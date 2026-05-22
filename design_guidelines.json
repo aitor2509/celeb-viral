@@ -1,0 +1,77 @@
+{
+  "theme": "dark",
+  "archetype": "4_Swiss_High_Contrast",
+  "archetype_adaptation": "Neon-Brutalist Dark Mode for Social Media Monitoring. Deep black background with stark white text, separated by 1px borders. Intense accent colors injected dynamically based on the selected celebrity.",
+  "typography": {
+    "font_family_headings": "'Cabinet Grotesk', sans-serif",
+    "font_family_body": "'Outfit', sans-serif",
+    "hierarchy": {
+      "h1": "text-4xl sm:text-5xl font-black tracking-tighter",
+      "h2": "text-2xl sm:text-3xl font-bold tracking-tight",
+      "h3": "text-xl sm:text-2xl font-bold tracking-tight",
+      "h4": "text-lg font-semibold tracking-tight",
+      "body": "text-base font-normal leading-relaxed",
+      "small": "text-sm font-medium tracking-wide uppercase"
+    }
+  },
+  "colors": {
+    "background": "#0A0A0B",
+    "surface": "#111113",
+    "surface_hover": "#1A1A1D",
+    "border": "rgba(255, 255, 255, 0.08)",
+    "text_primary": "#FFFFFF",
+    "text_secondary": "#A1A1AA",
+    "celebrity_accents": {
+      "Franco Escamilla": "#007AFF",
+      "Don Cheto": "#FF6B00",
+      "El Potro": "#00FF66",
+      "Said el Interrogatorio": "#FF3B30",
+      "Rica Famosa Latina": "#FF007F"
+    }
+  },
+  "spacing_and_layout": {
+    "container_padding": "p-6 md:p-8",
+    "grid_gap": "gap-6",
+    "bento_grid": "grid grid-cols-1 md:grid-cols-3 xl:grid-cols-4 gap-6",
+    "border_radius": "rounded-xl"
+  },
+  "surface_strategies": {
+    "dashboard_cards": "bg-[#111113] border border-white/10 rounded-xl overflow-hidden relative",
+    "header": "sticky top-0 z-50 bg-[#0A0A0B]/80 backdrop-blur-xl border-b border-white/10",
+    "sidebar": "bg-[#0A0A0B] border-r border-white/10"
+  },
+  "components": {
+    "sidebar": "Left navigation listing added celebrities. Active item gets a 2px left border matching the celebrity's custom color.",
+    "search_bar": "Command-K style omnibox in the header. Large, prominent. `bg-[#1A1A1D] border border-white/10 rounded-lg text-white px-4 py-2`",
+    "notifications": "Bell icon with a vibrant red/accent badge for unread alerts.",
+    "profile_header": "Span full width. Contains Avatar, Name, Stats. Uses a subtle background radial gradient (`blur-3xl`) of the celebrity's specific color.",
+    "youtube_feed_card": "List or grid of video cards. Thumbnail takes 40% width, text 60%. Hover states zoom thumbnail slightly.",
+    "funas_tracker": "A specialized 'Radar' card. High visual tension. Entries have timestamps and context. Uses a subtle red tint for negative 'funas' or the celebrity color for neutral virality.",
+    "add_celebrity_form": "Shadcn Dialog/Modal. Inputs for Name, YouTube Channel URL, and a Color Picker (or preset swatches).",
+    "add_contact_button": "Prominent CTA in the profile header. `bg-transparent border border-white/20 hover:bg-white/5`."
+  },
+  "icons": {
+    "library": "lucide-react",
+    "usage": "Use crisp, 1.5 stroke-width icons. Tint icons with the celebrity accent color when inside their context."
+  },
+  "images": {
+    "Franco Escamilla": "https://images.unsplash.com/photo-1724689527476-9902ce6382f3?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA2MTJ8MHwxfHNlYXJjaHwxfHxtZXhpY2FuJTIwc3RhbmQlMjB1cCUyMGNvbWVkaWFuJTIwc3RhZ2V8ZW58MHx8fHwxNzc5NDg3MDg1fDA&ixlib=rb-4.1.0&q=85",
+    "Don Cheto": "https://images.pexels.com/photos/34595671/pexels-photo-34595671.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+    "El Potro": "https://images.pexels.com/photos/14540970/pexels-photo-14540970.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+    "Said el Interrogatorio": "https://images.unsplash.com/photo-1559523161-0fc0d8b38a7a?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjAzMzN8MHwxfHNlYXJjaHwxfHx5b3V0dWJlJTIwcG9kY2FzdGVyJTIwc3R1ZGlvfGVufDB8fHx8MTc3OTQ4NzA4NXww&ixlib=rb-4.1.0&q=85",
+    "Rica Famosa Latina": "https://images.unsplash.com/photo-1764510380179-d53695bb0e66?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2NzZ8MHwxfHNlYXJjaHwxfHxsYXRpbmElMjByZWFsaXR5JTIwc3RhciUyMGdsYW1vcm91c3xlbnwwfHx8fDE3Nzk0ODcwODV8MA&ixlib=rb-4.1.0&q=85",
+    "youtube_thumbnail_placeholder": "https://images.pexels.com/photos/37355141/pexels-photo-37355141.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940"
+  },
+  "instructions_to_main_agent": [
+    "INSTALL FONTS: Ensure you import 'Cabinet Grotesk' and 'Outfit' from a valid CDN (like Fontshare or Google Fonts).",
+    "STATE MANAGEMENT: Maintain a state for `selectedCelebrity`. The UI's accent colors (buttons, glows, active borders) MUST reactively change based on the selected celebrity's assigned color.",
+    "LAYOUT: Build a fixed Sidebar (w-64) and a flexible Main Content area. The header should be sticky inside the Main Content.",
+    "MOCK DATA: Create a robust mock data object containing the 5 initial celebrities, their specific colors, past youtube videos, and a few 'funas/virales' entries.",
+    "COMPONENTS TO USE: Use Shadcn UI for standard elements (Dialogs, Inputs, Dropdowns). For layout wrappers and Cards, use raw HTML/Tailwind to enforce the `bg-[#111113] border border-white/10` strict brutalist styling.",
+    "TESTING: Every interactive element (Search, Add Button, Celebrity List Item, YouTube Video link) MUST have a `data-testid` attribute (e.g., `data-testid='celebrity-list-item-franco'`).",
+    "GLOW EFFECT: In the main detail view, place an absolute positioned div behind the profile header with `bg-[var(--celebrity-color)]/20 blur-3xl rounded-full` to give that specific character's glow."
+  ],
+  "accessibility": {
+    "contrast": "Ensure white text is used against the deep black background. For accent-colored text or buttons, verify the color contrast ratio. If an accent color is too bright (e.g., Neon Green), use it for borders/icons rather than text backgrounds, or use black text over the neon button."
+  }
+}
