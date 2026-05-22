@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { api, fmtNumber, timeAgo } from "@/lib/api";
-import { Play, Eye, ThumbsUp, MessageCircle, Sparkles, Loader2, Settings2 } from "lucide-react";
+import { Play, Eye, ThumbsUp, MessageCircle, Sparkles, Loader2, Settings2, Flame, Scissors, ExternalLink } from "lucide-react";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -16,6 +16,22 @@ const VideoSection = ({ celebrity, kind, onCelebrityUpdate }) => {
     const [recoLoading, setRecoLoading] = useState(false);
     const [contextOpen, setContextOpen] = useState(false);
     const [contextDraft, setContextDraft] = useState(celebrity.trending_context || "");
+    const [clipsModal, setClipsModal] = useState(null);
+    const [clipsLoading, setClipsLoading] = useState(false);
+
+    const handleShowClips = async (video) => {
+        setClipsModal({ video, data: null });
+        setClipsLoading(true);
+        try {
+            const res = await api.get(`/celebrities/${celebrity.id}/videos/${video.video_id}/clips`);
+            setClipsModal({ video, data: res.data });
+        } catch (e) {
+            toast.error("Error al detectar clips");
+            setClipsModal(null);
+        } finally {
+            setClipsLoading(false);
+        }
+    };
 
     const load = useCallback(async () => {
         const [r, v] = await Promise.all([
@@ -68,11 +84,11 @@ const VideoSection = ({ celebrity, kind, onCelebrityUpdate }) => {
                 </TabsList>
 
                 <TabsContent value="recent" className="mt-5">
-                    <Grid videos={recent} kind={kind} />
+                    <Grid videos={recent} kind={kind} onShowClips={handleShowClips} />
                 </TabsContent>
 
                 <TabsContent value="viral" className="mt-5">
-                    <Grid videos={viral} kind={kind} />
+                    <Grid videos={viral} kind={kind} onShowClips={handleShowClips} />
                 </TabsContent>
 
                 <TabsContent value="reco" className="mt-5">
@@ -173,6 +189,55 @@ const VideoSection = ({ celebrity, kind, onCelebrityUpdate }) => {
                 </TabsContent>
             </Tabs>
 
+            <Dialog open={!!clipsModal} onOpenChange={(o) => !o && setClipsModal(null)}>
+                <DialogContent className="bg-[#111113] border-white/10 text-white max-w-2xl max-h-[85vh] overflow-y-auto">
+                    <DialogHeader>
+                        <DialogTitle className="font-display text-xl tracking-tight flex items-center gap-2">
+                            <Scissors className="w-4 h-4 celeb-text" /> Clips virales detectados
+                        </DialogTitle>
+                        <DialogDescription className="text-white/50 line-clamp-2">
+                            {clipsModal?.video?.title}
+                        </DialogDescription>
+                    </DialogHeader>
+                    {clipsLoading && <div className="py-12 text-center text-white/40 flex items-center justify-center gap-2"><Loader2 className="w-4 h-4 animate-spin" /> Analizando capítulos...</div>}
+                    {clipsModal?.data?.message && (
+                        <div className="p-6 text-center text-white/50 text-sm border border-dashed border-white/10 rounded-xl">
+                            {clipsModal.data.message}
+                        </div>
+                    )}
+                    {clipsModal?.data?.clips?.length > 0 && (
+                        <div className="space-y-2">
+                            <p className="text-xs text-white/40">Top segmentos rankeados por duración óptima (45s-3min) + heat de keywords. Click para abrir en YouTube en ese minuto exacto.</p>
+                            {clipsModal.data.clips.map((c, i) => (
+                                <a
+                                    key={i}
+                                    href={c.link}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    data-testid={`clip-item-${i}`}
+                                    className="flex items-center gap-3 p-3 rounded-lg bg-black/40 border border-white/10 hover:celeb-border transition"
+                                >
+                                    <div
+                                        className="w-12 h-12 rounded-lg font-display font-black flex items-center justify-center text-black text-lg shrink-0"
+                                        style={{ background: c.clip_score >= 70 ? "#FF3B30" : c.clip_score >= 50 ? "#FACC15" : "#06B6D4" }}
+                                    >
+                                        {c.clip_score}
+                                    </div>
+                                    <div className="flex-1 min-w-0">
+                                        <div className="flex items-center gap-2 text-[11px] text-white/40 font-mono">
+                                            <span>{c.ts}</span><span>→</span><span>{c.end_ts}</span>
+                                            <span className="text-white/30">({c.duration}s)</span>
+                                        </div>
+                                        <p className="text-sm font-medium text-white truncate mt-0.5">{c.topic}</p>
+                                    </div>
+                                    <ExternalLink className="w-3.5 h-3.5 text-white/40 shrink-0" />
+                                </a>
+                            ))}
+                        </div>
+                    )}
+                </DialogContent>
+            </Dialog>
+
             <Dialog open={contextOpen} onOpenChange={setContextOpen}>
                 <DialogContent className="bg-[#111113] border-white/10 text-white max-w-lg">
                     <DialogHeader>
@@ -202,7 +267,7 @@ const VideoSection = ({ celebrity, kind, onCelebrityUpdate }) => {
     );
 };
 
-const Grid = ({ videos, kind }) => {
+const Grid = ({ videos, kind, onShowClips }) => {
     if (!videos || videos.length === 0) {
         return (
             <div className="p-12 text-center text-white/30 border border-dashed border-white/10 rounded-xl">
@@ -214,49 +279,66 @@ const Grid = ({ videos, kind }) => {
     const gridCls = isShort
         ? "grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3"
         : "grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4";
+    const scoreColor = (s) => s >= 75 ? "#FF3B30" : s >= 55 ? "#FACC15" : s >= 35 ? "#06B6D4" : "#71717A";
     return (
         <div className={gridCls}>
             {videos.map((v) => (
-                <a
-                    key={v.video_id}
-                    href={v.url}
-                    target="_blank"
-                    rel="noreferrer"
-                    data-testid={`${kind}-video-${v.video_id}`}
-                    className="group rounded-xl bg-[#111113] border border-white/10 hover:border-white/20 overflow-hidden transition-all"
-                >
-                    <div className={`relative ${isShort ? "aspect-[9/16]" : "aspect-video"} overflow-hidden bg-black`}>
-                        <img src={v.thumbnail_url} alt={v.title} className="w-full h-full object-cover group-hover:scale-105 transition duration-500" />
-                        <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent" />
-                        <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition">
-                            <div className="w-12 h-12 rounded-full celeb-bg flex items-center justify-center">
-                                <Play className="w-5 h-5 text-black fill-black ml-0.5" />
+                <div key={v.video_id} data-testid={`${kind}-video-${v.video_id}`} className="group rounded-xl bg-[#111113] border border-white/10 hover:border-white/20 overflow-hidden transition-all">
+                    <a href={v.url} target="_blank" rel="noreferrer" className="block">
+                        <div className={`relative ${isShort ? "aspect-[9/16]" : "aspect-video"} overflow-hidden bg-black`}>
+                            <img src={v.thumbnail_url} alt={v.title} className="w-full h-full object-cover group-hover:scale-105 transition duration-500" />
+                            <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent" />
+                            <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition">
+                                <div className="w-12 h-12 rounded-full celeb-bg flex items-center justify-center">
+                                    <Play className="w-5 h-5 text-black fill-black ml-0.5" />
+                                </div>
                             </div>
-                        </div>
-                        <div className="absolute bottom-2 left-2 text-[10px] uppercase tracking-widest font-bold text-white/80">
-                            {timeAgo(v.published_at)}
-                        </div>
-                        {v.duration_seconds > 0 && (
-                            <div className="absolute bottom-2 right-2 text-[10px] font-bold text-white bg-black/70 px-1.5 py-0.5 rounded">
-                                {Math.floor(v.duration_seconds / 60)}:{String(v.duration_seconds % 60).padStart(2, "0")}
+                            {/* Viral score badge */}
+                            {v.viral_score != null && (
+                                <div
+                                    data-testid={`viral-score-${v.video_id}`}
+                                    className="absolute top-2 right-2 px-2 py-1 rounded-md font-display font-black text-xs text-black shadow-lg flex items-center gap-1"
+                                    style={{ background: scoreColor(v.viral_score) }}
+                                    title={`Score viral ${v.viral_score}/100`}
+                                >
+                                    <Flame className="w-3 h-3" strokeWidth={3} />
+                                    {v.viral_score}
+                                </div>
+                            )}
+                            <div className="absolute bottom-2 left-2 text-[10px] uppercase tracking-widest font-bold text-white/80">
+                                {timeAgo(v.published_at)}
                             </div>
-                        )}
-                    </div>
-                    <div className="p-3">
-                        <h4 className={`font-medium text-white line-clamp-2 leading-snug ${isShort ? "text-xs min-h-[2rem]" : "text-sm min-h-[2.5rem]"}`}>
-                            {v.title}
-                        </h4>
-                        <div className="flex items-center gap-3 mt-2 text-[10px] text-white/40">
-                            <span className="flex items-center gap-1"><Eye className="w-3 h-3" /> {fmtNumber(v.view_count)}</span>
-                            {!isShort && (
-                                <>
-                                    <span className="flex items-center gap-1"><ThumbsUp className="w-3 h-3" /> {fmtNumber(v.like_count)}</span>
-                                    <span className="flex items-center gap-1"><MessageCircle className="w-3 h-3" /> {fmtNumber(v.comment_count)}</span>
-                                </>
+                            {v.duration_seconds > 0 && (
+                                <div className="absolute bottom-2 right-2 text-[10px] font-bold text-white bg-black/70 px-1.5 py-0.5 rounded">
+                                    {Math.floor(v.duration_seconds / 60)}:{String(v.duration_seconds % 60).padStart(2, "0")}
+                                </div>
                             )}
                         </div>
-                    </div>
-                </a>
+                        <div className="p-3">
+                            <h4 className={`font-medium text-white line-clamp-2 leading-snug ${isShort ? "text-xs min-h-[2rem]" : "text-sm min-h-[2.5rem]"}`}>
+                                {v.title}
+                            </h4>
+                            <div className="flex items-center gap-3 mt-2 text-[10px] text-white/40">
+                                <span className="flex items-center gap-1"><Eye className="w-3 h-3" /> {fmtNumber(v.view_count)}</span>
+                                {!isShort && (
+                                    <>
+                                        <span className="flex items-center gap-1"><ThumbsUp className="w-3 h-3" /> {fmtNumber(v.like_count)}</span>
+                                        <span className="flex items-center gap-1"><MessageCircle className="w-3 h-3" /> {fmtNumber(v.comment_count)}</span>
+                                    </>
+                                )}
+                            </div>
+                        </div>
+                    </a>
+                    {!isShort && onShowClips && v.duration_seconds > 300 && (
+                        <button
+                            onClick={() => onShowClips(v)}
+                            data-testid={`detect-clips-${v.video_id}`}
+                            className="w-full px-3 py-2 border-t border-white/10 text-xs font-bold text-white/70 hover:celeb-text hover:bg-white/5 transition flex items-center justify-center gap-1.5"
+                        >
+                            <Scissors className="w-3 h-3" /> Detectar clips virales
+                        </button>
+                    )}
+                </div>
             ))}
         </div>
     );

@@ -81,6 +81,7 @@ class CelebrityVideo(BaseModel):
     duration: Optional[str] = None
     duration_seconds: int = 0
     is_short: bool = False
+    viral_score: int = 0
     url: str
     fetched_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
@@ -230,6 +231,107 @@ def search_youtube_channels(query: str, max_results: int = 8):
         raise HTTPException(status_code=400, detail=f"YouTube search failed: {str(e)}")
 
 
+# ===== Viral Score (free, heuristic) =====
+HOT_KEYWORDS = [
+    "funa", "polémica", "polemica", "viral", "controversia", "escándalo", "escandalo",
+    "exclusiva", "revelación", "revelacion", "exposed", "confiesa", "rompe el silencio",
+    "trump", "presidente", "guerra", "ucrania", "muere", "muerte", "detenido",
+    "cárcel", "carcel", "demanda", "denuncia", "feminicidio", "narco",
+    "vs", "pelea", "responde", "callar", "lloró", "lloro", "se quiebra",
+    "?", "¿", "!", "shock", "increíble", "increible",
+]
+
+
+def compute_viral_score(video: dict, channel_subs: int) -> int:
+    """Heuristic 0-100 score. Free, no API."""
+    try:
+        views = max(int(video.get("view_count", 0)), 0)
+        likes = max(int(video.get("like_count", 0)), 0)
+        comments = max(int(video.get("comment_count", 0)), 0)
+        subs = max(int(channel_subs or 0), 1)
+        pub = video.get("published_at", "")
+        try:
+            pub_dt = datetime.fromisoformat(pub.replace("Z", "+00:00"))
+            days_old = max((datetime.now(timezone.utc) - pub_dt).total_seconds() / 86400, 0.5)
+        except Exception:
+            days_old = 30
+        velocity = views / days_old  # views per day
+        # log-scaled normalizations
+        import math
+        # velocity score: 0-40 (10K/day ~= 30, 100K/day ~= 40)
+        velocity_score = min(40, math.log10(max(velocity, 1)) * 9)
+        # reach: views/subs (rare viral hit). 0-25
+        reach = views / subs
+        reach_score = min(25, math.log10(max(reach * 100, 1)) * 8)
+        # engagement: (likes + comments*3) / views. 0-20
+        eng = (likes + comments * 3) / max(views, 1)
+        engagement_score = min(20, eng * 400)
+        # recency: 0-10 if <14 days
+        recency_score = max(0, 10 - (days_old / 1.4)) if days_old < 14 else 0
+        # title heat: 0-5
+        title = (video.get("title", "") + " " + video.get("description", "")[:200]).lower()
+        heat_hits = sum(1 for k in HOT_KEYWORDS if k in title)
+        heat_score = min(5, heat_hits * 1.5)
+        total = velocity_score + reach_score + engagement_score + recency_score + heat_score
+        return int(round(min(100, max(0, total))))
+    except Exception:
+        return 0
+
+
+# ===== Chapter Parser (free) =====
+TIMESTAMP_RE = re.compile(r"(?:^|\s)(\d{1,2}:\d{2}(?::\d{2})?)\s*[-–—:]?\s*([^\n]{3,120})", re.MULTILINE)
+
+
+def ts_to_seconds(ts: str) -> int:
+    parts = [int(p) for p in ts.split(":")]
+    if len(parts) == 2:
+        return parts[0] * 60 + parts[1]
+    if len(parts) == 3:
+        return parts[0] * 3600 + parts[1] * 60 + parts[2]
+    return 0
+
+
+def parse_chapters(description: str, total_duration: int = 0):
+    """Extracts timestamped chapters from a video description."""
+    if not description:
+        return []
+    chapters = []
+    for m in TIMESTAMP_RE.finditer(description):
+        ts = m.group(1)
+        topic = m.group(2).strip().strip("-–—:").strip()
+        if len(topic) < 3:
+            continue
+        sec = ts_to_seconds(ts)
+        chapters.append({"start": sec, "ts": ts, "topic": topic})
+    # sort and compute durations
+    chapters.sort(key=lambda c: c["start"])
+    for i, c in enumerate(chapters):
+        next_start = chapters[i + 1]["start"] if i + 1 < len(chapters) else (total_duration or c["start"] + 600)
+        c["duration"] = max(next_start - c["start"], 0)
+        c["end_ts"] = f"{next_start // 60}:{next_start % 60:02d}"
+    return chapters
+
+
+def score_chapter_for_clip(chapter: dict) -> int:
+    """Score a chapter 0-100 based on duration suitability + keyword heat."""
+    dur = chapter.get("duration", 0)
+    # ideal clip length: 45s - 180s
+    if dur < 20:
+        dur_score = max(0, dur * 1.5)
+    elif 20 <= dur <= 45:
+        dur_score = 30 + (dur - 20) * 0.8
+    elif 45 < dur <= 180:
+        dur_score = 50
+    elif 180 < dur <= 300:
+        dur_score = 40 - (dur - 180) / 12
+    else:
+        dur_score = max(5, 25 - (dur - 300) / 60)
+    topic = chapter.get("topic", "").lower()
+    heat = sum(1 for k in HOT_KEYWORDS if k in topic)
+    heat_score = min(50, heat * 12)
+    return int(min(100, dur_score + heat_score))
+
+
 # ===== Seeding =====
 INITIAL_CELEBRITIES = [
     {"name": "Franco Escamilla", "color": "#007AFF", "query": "Franco Escamilla", "channel_id": "UC9gQc88X-EVzYJsr_yOSnvA"},
@@ -337,6 +439,10 @@ async def refresh_celebrity_videos(celeb_id: str, channel_id: str = None, notify
     all_new = []
     for ch_id in channels_to_fetch:
         videos = await fetch_latest_videos(ch_id, max_results=30)
+        # compute viral score per video using main channel subs
+        channel_subs = celeb.get("subscriber_count", 1)
+        for v in videos:
+            v["viral_score"] = compute_viral_score(v, channel_subs)
         new_videos = [v for v in videos if v["video_id"] not in existing_ids]
         all_new.extend(new_videos)
         for v in videos:
@@ -568,6 +674,41 @@ async def get_viral_videos(celeb_id: str, kind: str = "video"):
         {"celebrity_id": celeb_id, "is_short": is_short}, {"_id": 0},
     ).sort("view_count", -1).to_list(10)
     return {"videos": videos}
+
+
+@api_router.get("/celebrities/{celeb_id}/videos/{video_id}/clips")
+async def get_video_clips(celeb_id: str, video_id: str):
+    """Detect viral clip segments from video chapters in description. Free, no API."""
+    video = await db.videos.find_one(
+        {"celebrity_id": celeb_id, "video_id": video_id}, {"_id": 0},
+    )
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+    chapters = parse_chapters(video.get("description", ""), video.get("duration_seconds", 0))
+    if not chapters:
+        return {
+            "video_id": video_id,
+            "video_title": video.get("title"),
+            "chapters": [],
+            "clips": [],
+            "message": "Este video no tiene capítulos/timestamps en la descripción. No se pueden detectar clips automáticamente.",
+        }
+    scored = []
+    for c in chapters:
+        c_copy = dict(c)
+        c_copy["clip_score"] = score_chapter_for_clip(c)
+        # build link with timestamp
+        c_copy["link"] = f"https://www.youtube.com/watch?v={video_id}&t={c['start']}s"
+        scored.append(c_copy)
+    # top suggested clips (sorted by score, take top 10)
+    clips = sorted(scored, key=lambda x: x["clip_score"], reverse=True)[:10]
+    return {
+        "video_id": video_id,
+        "video_title": video.get("title"),
+        "video_url": video.get("url"),
+        "chapters": scored,
+        "clips": clips,
+    }
 
 
 # ===== Routes: Virals =====
