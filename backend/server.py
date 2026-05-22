@@ -190,7 +190,7 @@ async def fetch_latest_videos(channel_id: str, max_results: int = 30):
                 duration_sec = int(isodate.parse_duration(duration_str).total_seconds())
             except Exception:
                 duration_sec = 0
-            is_short = duration_sec > 0 and duration_sec <= 60
+            is_short = duration_sec > 0 and duration_sec <= 180
             results.append({
                 "channel_id": channel_id,
                 "channel_title": channel_title,
