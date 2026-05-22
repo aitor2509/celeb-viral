@@ -39,3 +39,12 @@ App para Meta Buster (agencia mexicana de social media) que rastrea celebridades
 - Optional: hourly cron to auto-detect new videos
 - Optional: Twilio SMS integration
 - Optional: News scraper for "funas"
+
+## Implemented (Iteration 2 · 2026-02)
+- ✅ Videos vs Shorts split (auto-detect via duration ≤ 60s)
+- ✅ 3 sub-tabs per kind: Más recientes / Más virales del canal / Recomendados Facebook
+- ✅ AI recommendations powered by Claude Sonnet 4.5 (Emergent LLM key)
+- ✅ User-editable "trending context" textarea, persisted per celebrity
+- ✅ Auto-scraped Google News tab (México, español, 1h cache)
+- ✅ Multi-channel support: secondary YouTube channels per celebrity
+- ✅ Delete celebrity confirmed working
