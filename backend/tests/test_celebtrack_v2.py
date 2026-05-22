@@ -46,7 +46,7 @@ class TestVideosShortsSplit:
         vids = _wait_videos(s, franco_id, "video")
         assert len(vids) > 0, "No long videos returned"
         for v in vids:
-            assert v.get("is_short") is False, f"Long endpoint returned short: {v.get('video_id')}"
+            assert v.get("is_short") == False, f"Long endpoint returned short: {v.get('video_id')}"
             # duration may be 0 if unparseable, but if present, > 60
             if v.get("duration_seconds"):
                 assert v["duration_seconds"] > 60, f"Long video w/ dur<=60: {v['video_id']}"
@@ -55,7 +55,7 @@ class TestVideosShortsSplit:
         vids = _wait_videos(s, franco_id, "short")
         assert len(vids) > 0, "No shorts returned"
         for v in vids:
-            assert v.get("is_short") is True
+            assert v.get("is_short") == True
             assert 0 < v.get("duration_seconds", 0) <= 60
 
     def test_videos_recent_sorted(self, s, franco_id):
@@ -77,7 +77,7 @@ class TestVideosShortsSplit:
         r = s.get(f"{API}/celebrities/{franco_id}/viral-videos", params={"kind": "video"})
         assert r.status_code == 200
         vids = r.json()["videos"]
-        assert all(v.get("is_short") is False for v in vids)
+        assert all(v.get("is_short") == False for v in vids)
 
 
 # ===== Trending context =====

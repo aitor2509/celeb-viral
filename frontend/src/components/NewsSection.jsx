@@ -60,7 +60,7 @@ const NewsSection = ({ celebrity }) => {
                 )}
                 {news.map((n, i) => (
                     <a
-                        key={i}
+                        key={n.link || `news-${i}`}
                         href={n.link}
                         target="_blank"
                         rel="noreferrer"

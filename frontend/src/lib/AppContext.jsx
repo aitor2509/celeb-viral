@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useEffect, useState, useCallback } from "react";
+import React, { createContext, useContext, useEffect, useState, useCallback, useMemo } from "react";
 import { api } from "@/lib/api";
 
 const AppCtx = createContext(null);
@@ -52,19 +52,21 @@ export const AppProvider = ({ children }) => {
         await loadNotifications();
     };
 
+    const value = useMemo(() => ({
+        celebrities,
+        notifications,
+        unread,
+        selectedColor,
+        setSelectedColor,
+        loadCelebrities,
+        loadNotifications,
+        markAllRead,
+        markRead,
+        loading,
+    }), [celebrities, notifications, unread, selectedColor, loadCelebrities, loadNotifications, loading]);
+
     return (
-        <AppCtx.Provider value={{
-            celebrities,
-            notifications,
-            unread,
-            selectedColor,
-            setSelectedColor,
-            loadCelebrities,
-            loadNotifications,
-            markAllRead,
-            markRead,
-            loading,
-        }}>
+        <AppCtx.Provider value={value}>
             {children}
         </AppCtx.Provider>
     );

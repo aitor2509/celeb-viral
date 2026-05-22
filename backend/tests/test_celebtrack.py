@@ -185,4 +185,4 @@ class TestRefreshAll:
     def test_refresh_all(self, s):
         r = s.post(f"{API}/refresh-all", timeout=120)
         assert r.status_code == 200
-        assert r.json()["ok"] is True
+        assert r.json()["ok"] == True
