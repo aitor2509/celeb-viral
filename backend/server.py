@@ -611,7 +611,8 @@ async def get_ai_recommendations(celeb_id: str, kind: str = "video"):
     celeb = await db.celebrities.find_one({"id": celeb_id}, {"_id": 0})
     if not celeb:
         raise HTTPException(status_code=404, detail="Celebrity not found")
-    if not EMERGENT_LLM_KEY:
+     api_key = os.environ.get('ANTHROPIC_API_KEY') or EMERGENT_LLM_KEY
+    if not api_key:
         raise HTTPException(status_code=500, detail="LLM key not configured")
     is_short = kind == "short"
     videos = await db.videos.find(
@@ -645,12 +646,14 @@ async def get_ai_recommendations(celeb_id: str, kind: str = "video"):
         f"Selecciona los TOP 5 más recomendados, ordenados por score descendente. Sé crítico y específico."
     )
     try:
-        chat = LlmChat(
-            api_key=EMERGENT_LLM_KEY,
-            session_id=f"reco-{celeb_id}-{uuid.uuid4().hex[:8]}",
-            system_message=system_msg,
-        ).with_model("anthropic", "claude-sonnet-4-5-20250929")
-        response = await chat.send_message(UserMessage(text=user_text))
+           anthropic_client = anthropic.Anthropic(api_key=api_key)
+        message = anthropic_client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=1000,
+            system=system_msg,
+            messages=[{"role": "user", "content": user_text}]
+        )
+        response = message.content[0].text
         # Parse JSON from response
         text = response.strip()
         # try to find json
