@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 import isodate
 import feedparser
 import requests
-from emergentintegrations.llm.chat import LlmChat, UserMessage
+import anthropic
 
 
 ROOT_DIR = Path(__file__).parent
