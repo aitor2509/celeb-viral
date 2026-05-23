@@ -3,8 +3,6 @@ uvicorn==0.25.0
 motor==3.3.1
 pymongo==4.5.0
 python-dotenv==1.2.2
-google-api-python-client==2.196.0
-google-auth==2.53.0
 feedparser==6.0.12
 requests==2.34.2
 pydantic==2.13.4
@@ -12,3 +10,5 @@ python-multipart==0.0.29
 isodate==0.7.2
 anthropic>=0.40.0
 starlette==0.37.2
+google-api-python-client
+google-auth
