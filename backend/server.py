@@ -611,7 +611,7 @@ async def get_ai_recommendations(celeb_id: str, kind: str = "video"):
     celeb = await db.celebrities.find_one({"id": celeb_id}, {"_id": 0})
     if not celeb:
         raise HTTPException(status_code=404, detail="Celebrity not found")
-     api_key = os.environ.get('ANTHROPIC_API_KEY') or EMERGENT_LLM_KEY
+    api_key = os.environ.get('ANTHROPIC_API_KEY') or EMERGENT_LLM_KEY
     if not api_key:
         raise HTTPException(status_code=500, detail="LLM key not configured")
     is_short = kind == "short"
@@ -646,7 +646,7 @@ async def get_ai_recommendations(celeb_id: str, kind: str = "video"):
         f"Selecciona los TOP 5 más recomendados, ordenados por score descendente. Sé crítico y específico."
     )
     try:
-           anthropic_client = anthropic.Anthropic(api_key=api_key)
+        anthropic_client = anthropic.Anthropic(api_key=api_key)
         message = anthropic_client.messages.create(
             model="claude-sonnet-4-6",
             max_tokens=1000,
