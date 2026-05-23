@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 import isodate
 import feedparser
 import requests
-import anthropic
+from groq import Groq
 
 
 ROOT_DIR = Path(__file__).parent
@@ -611,7 +611,7 @@ async def get_ai_recommendations(celeb_id: str, kind: str = "video"):
     celeb = await db.celebrities.find_one({"id": celeb_id}, {"_id": 0})
     if not celeb:
         raise HTTPException(status_code=404, detail="Celebrity not found")
-    api_key = os.environ.get('ANTHROPIC_API_KEY') or EMERGENT_LLM_KEY
+    api_key = os.environ.get('GROQ_API_KEY')
     if not api_key:
         raise HTTPException(status_code=500, detail="LLM key not configured")
     is_short = kind == "short"
@@ -646,14 +646,16 @@ async def get_ai_recommendations(celeb_id: str, kind: str = "video"):
         f"Selecciona los TOP 5 más recomendados, ordenados por score descendente. Sé crítico y específico."
     )
     try:
-        anthropic_client = anthropic.Anthropic(api_key=api_key)
-        message = anthropic_client.messages.create(
-            model="claude-sonnet-4-6",
+        groq_client = Groq(api_key=api_key)
+        message = groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
             max_tokens=1000,
-            system=system_msg,
-            messages=[{"role": "user", "content": user_text}]
+            messages=[
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": user_text}
+            ]
         )
-        response = message.content[0].text
+        response = message.choices[0].message.content
         # Parse JSON from response
         text = response.strip()
         # try to find json
