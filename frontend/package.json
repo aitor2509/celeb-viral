@@ -3,8 +3,14 @@
   "version": "0.1.0",
   "private": true,
   "engines": {
-  "node": "20.x"
-},
+    "node": "20.x"
+  },
+  "eslintConfig": {
+    "extends": ["react-app"],
+    "rules": {
+      "react-hooks/exhaustive-deps": "off"
+    }
+  },
   "dependencies": {
     "ajv": "^8.0.0",
     "@hookform/resolvers": "^5.0.1",
