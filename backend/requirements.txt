@@ -12,3 +12,4 @@ anthropic>=0.40.0
 starlette==0.37.2
 google-api-python-client
 google-auth
+groq
