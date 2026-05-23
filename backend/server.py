@@ -162,8 +162,8 @@ async def fetch_channel_info(channel_id: str):
         return None
 
 
-async def fetch_latest_videos(channel_id: str, max_results: int = 30):
-    """Fetch latest videos from a channel using the uploads playlist."""
+async def fetch_latest_videos(channel_id: str, max_results: int = 50):
+    """Fetch latest videos from a channel using the uploads playlist (paginated up to max_results)."""
     try:
         yt = yt_service()
         ch_resp = yt.channels().list(part="contentDetails,snippet", id=channel_id).execute()
@@ -172,45 +172,111 @@ async def fetch_latest_videos(channel_id: str, max_results: int = 30):
             return []
         channel_title = items[0]["snippet"]["title"]
         uploads_playlist = items[0]["contentDetails"]["relatedPlaylists"]["uploads"]
-        pl_resp = yt.playlistItems().list(
-            part="snippet,contentDetails",
-            playlistId=uploads_playlist,
-            maxResults=max_results,
-        ).execute()
-        video_ids = [it["contentDetails"]["videoId"] for it in pl_resp.get("items", [])]
+        video_ids = []
+        page_token = None
+        while len(video_ids) < max_results:
+            pl_resp = yt.playlistItems().list(
+                part="contentDetails",
+                playlistId=uploads_playlist,
+                maxResults=min(50, max_results - len(video_ids)),
+                pageToken=page_token,
+            ).execute()
+            video_ids.extend([it["contentDetails"]["videoId"] for it in pl_resp.get("items", [])])
+            page_token = pl_resp.get("nextPageToken")
+            if not page_token:
+                break
         if not video_ids:
             return []
-        vids_resp = yt.videos().list(
-            part="snippet,statistics,contentDetails",
-            id=",".join(video_ids),
-        ).execute()
         results = []
-        for v in vids_resp.get("items", []):
-            duration_str = v["contentDetails"].get("duration", "PT0S")
-            try:
-                duration_sec = int(isodate.parse_duration(duration_str).total_seconds())
-            except Exception:
-                duration_sec = 0
-            is_short = duration_sec > 0 and duration_sec <= 180
-            results.append({
-                "channel_id": channel_id,
-                "channel_title": channel_title,
-                "video_id": v["id"],
-                "title": v["snippet"]["title"],
-                "description": v["snippet"].get("description", "")[:1000],
-                "thumbnail_url": v["snippet"]["thumbnails"].get("high", v["snippet"]["thumbnails"]["default"])["url"],
-                "published_at": v["snippet"]["publishedAt"],
-                "view_count": int(v["statistics"].get("viewCount", 0)),
-                "like_count": int(v["statistics"].get("likeCount", 0)),
-                "comment_count": int(v["statistics"].get("commentCount", 0)),
-                "duration": duration_str,
-                "duration_seconds": duration_sec,
-                "is_short": is_short,
-                "url": f"https://www.youtube.com/watch?v={v['id']}" if not is_short else f"https://www.youtube.com/shorts/{v['id']}",
-            })
+        # videos.list supports up to 50 ids at a time
+        for i in range(0, len(video_ids), 50):
+            batch = video_ids[i:i + 50]
+            vids_resp = yt.videos().list(
+                part="snippet,statistics,contentDetails",
+                id=",".join(batch),
+            ).execute()
+            for v in vids_resp.get("items", []):
+                duration_str = v["contentDetails"].get("duration", "PT0S")
+                try:
+                    duration_sec = int(isodate.parse_duration(duration_str).total_seconds())
+                except Exception:
+                    duration_sec = 0
+                is_short = duration_sec > 0 and duration_sec <= 180
+                results.append({
+                    "channel_id": channel_id,
+                    "channel_title": channel_title,
+                    "video_id": v["id"],
+                    "title": v["snippet"]["title"],
+                    "description": v["snippet"].get("description", "")[:1000],
+                    "thumbnail_url": v["snippet"]["thumbnails"].get("high", v["snippet"]["thumbnails"]["default"])["url"],
+                    "published_at": v["snippet"]["publishedAt"],
+                    "view_count": int(v["statistics"].get("viewCount", 0)),
+                    "like_count": int(v["statistics"].get("likeCount", 0)),
+                    "comment_count": int(v["statistics"].get("commentCount", 0)),
+                    "duration": duration_str,
+                    "duration_seconds": duration_sec,
+                    "is_short": is_short,
+                    "url": f"https://www.youtube.com/watch?v={v['id']}" if not is_short else f"https://www.youtube.com/shorts/{v['id']}",
+                })
         return results
     except HttpError as e:
         logging.error(f"YouTube fetch_latest_videos error: {e}")
+        return []
+
+
+def fetch_top_viewed_from_channel(channel_id: str, max_results: int = 50):
+    """Use search.list with order=viewCount to get the all-time top-viewed videos from a channel."""
+    try:
+        yt = yt_service()
+        ids = []
+        page_token = None
+        while len(ids) < max_results:
+            resp = yt.search().list(
+                part="id",
+                channelId=channel_id,
+                type="video",
+                order="viewCount",
+                maxResults=min(50, max_results - len(ids)),
+                pageToken=page_token,
+            ).execute()
+            ids.extend([it["id"]["videoId"] for it in resp.get("items", []) if it.get("id", {}).get("videoId")])
+            page_token = resp.get("nextPageToken")
+            if not page_token:
+                break
+        if not ids:
+            return []
+        results = []
+        for i in range(0, len(ids), 50):
+            batch = ids[i:i + 50]
+            vids_resp = yt.videos().list(
+                part="snippet,statistics,contentDetails",
+                id=",".join(batch),
+            ).execute()
+            for v in vids_resp.get("items", []):
+                duration_str = v["contentDetails"].get("duration", "PT0S")
+                try:
+                    duration_sec = int(isodate.parse_duration(duration_str).total_seconds())
+                except Exception:
+                    duration_sec = 0
+                is_short = duration_sec > 0 and duration_sec <= 180
+                results.append({
+                    "channel_id": channel_id,
+                    "video_id": v["id"],
+                    "title": v["snippet"]["title"],
+                    "description": v["snippet"].get("description", "")[:1000],
+                    "thumbnail_url": v["snippet"]["thumbnails"].get("high", v["snippet"]["thumbnails"]["default"])["url"],
+                    "published_at": v["snippet"]["publishedAt"],
+                    "view_count": int(v["statistics"].get("viewCount", 0)),
+                    "like_count": int(v["statistics"].get("likeCount", 0)),
+                    "comment_count": int(v["statistics"].get("commentCount", 0)),
+                    "duration": duration_str,
+                    "duration_seconds": duration_sec,
+                    "is_short": is_short,
+                    "url": f"https://www.youtube.com/watch?v={v['id']}" if not is_short else f"https://www.youtube.com/shorts/{v['id']}",
+                })
+        return results
+    except HttpError as e:
+        logging.error(f"top viewed error: {e}")
         return []
 
 
@@ -438,7 +504,7 @@ async def refresh_celebrity_videos(celeb_id: str, channel_id: str = None, notify
     had_previous = len(existing_ids) > 0
     all_new = []
     for ch_id in channels_to_fetch:
-        videos = await fetch_latest_videos(ch_id, max_results=30)
+        videos = await fetch_latest_videos(ch_id, max_results=60)
         # compute viral score per video using main channel subs
         channel_subs = celeb.get("subscriber_count", 1)
         for v in videos:
@@ -667,13 +733,58 @@ async def fetch_google_news(query: str, max_items: int = 20):
 
 
 @api_router.get("/celebrities/{celeb_id}/viral-videos")
-async def get_viral_videos(celeb_id: str, kind: str = "video"):
-    """Top 10 videos/shorts by view count from this celebrity's channels."""
+async def get_viral_videos(celeb_id: str, kind: str = "video", refresh: bool = False):
+    """All-time top viewed videos/shorts across the WHOLE channel(s) via YouTube search order=viewCount."""
+    celeb = await db.celebrities.find_one({"id": celeb_id}, {"_id": 0})
+    if not celeb:
+        raise HTTPException(status_code=404, detail="Celebrity not found")
     is_short = kind == "short"
-    videos = await db.videos.find(
-        {"celebrity_id": celeb_id, "is_short": is_short}, {"_id": 0},
-    ).sort("view_count", -1).to_list(10)
-    return {"videos": videos}
+    cache_key = f"{celeb_id}:{kind}"
+    cache = await db.viral_cache.find_one({"_key": cache_key}, {"_id": 0})
+    needs_refresh = refresh or not cache
+    if cache and not refresh:
+        try:
+            fetched = datetime.fromisoformat(cache["fetched_at"])
+            if (datetime.now(timezone.utc) - fetched).total_seconds() > 86400:
+                needs_refresh = True
+        except Exception:
+            needs_refresh = True
+    if needs_refresh:
+        channels = []
+        if celeb.get("youtube_channel_id"):
+            channels.append(celeb["youtube_channel_id"])
+        for sc in celeb.get("secondary_channels", []):
+            channels.append(sc["channel_id"])
+        all_top = []
+        loop = asyncio.get_event_loop()
+        for ch_id in channels:
+            vids = await loop.run_in_executor(None, lambda c=ch_id: fetch_top_viewed_from_channel(c, max_results=50))
+            all_top.extend(vids)
+        channel_subs = celeb.get("subscriber_count", 1)
+        for v in all_top:
+            v["celebrity_id"] = celeb_id
+            v["viral_score"] = compute_viral_score(v, channel_subs)
+        # filter by kind, sort by views, dedupe
+        seen = set()
+        filtered = []
+        for v in sorted(all_top, key=lambda x: x.get("view_count", 0), reverse=True):
+            if v["video_id"] in seen:
+                continue
+            if v["is_short"] != is_short:
+                continue
+            seen.add(v["video_id"])
+            filtered.append(v)
+        filtered = filtered[:30]
+        await db.viral_cache.update_one(
+            {"_key": cache_key},
+            {"$set": {
+                "_key": cache_key, "celebrity_id": celeb_id, "kind": kind,
+                "videos": filtered, "fetched_at": datetime.now(timezone.utc).isoformat(),
+            }},
+            upsert=True,
+        )
+        return {"videos": filtered}
+    return {"videos": cache.get("videos", [])}
 
 
 @api_router.get("/celebrities/{celeb_id}/videos/{video_id}/clips")

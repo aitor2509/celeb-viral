@@ -151,11 +151,11 @@ const CelebrityDetail = () => {
                 </TabsList>
 
                 <TabsContent value="videos" className="mt-6">
-                    <VideoSection celebrity={celeb} kind="video" onCelebrityUpdate={loadCeleb} />
+                    <VideoSection key={`${celeb.id}-video`} celebrity={celeb} kind="video" onCelebrityUpdate={loadCeleb} />
                 </TabsContent>
 
                 <TabsContent value="shorts" className="mt-6">
-                    <VideoSection celebrity={celeb} kind="short" onCelebrityUpdate={loadCeleb} />
+                    <VideoSection key={`${celeb.id}-short`} celebrity={celeb} kind="short" onCelebrityUpdate={loadCeleb} />
                 </TabsContent>
 
                 <TabsContent value="news" className="mt-6">
