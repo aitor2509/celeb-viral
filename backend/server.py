@@ -224,7 +224,7 @@ async def fetch_latest_videos(channel_id: str, max_results: int = 100):
         return []
 
 
-def fetch_top_viewed_from_channel(channel_id: str, max_results: int = 50):
+def fetch_top_viewed_from_channel(channel_id: str, max_results: int = 200):
     """Use search.list with order=viewCount to get the all-time top-viewed videos from a channel."""
     try:
         yt = yt_service()
@@ -548,6 +548,8 @@ async def get_celebrity_videos(celeb_id: str, kind: str = "video", sort: str = "
     has_channels = celeb.get("youtube_channel_id") or celeb.get("secondary_channels")
     if refresh and has_channels:
         await refresh_celebrity_videos(celeb_id)
+        # Also reset viral cache so "Más virales" re-scans whole channel
+        await db.viral_cache.delete_many({"celebrity_id": celeb_id})
     # If no videos, fetch now
     count = await db.videos.count_documents({"celebrity_id": celeb_id})
     if count == 0 and has_channels:
@@ -887,7 +889,8 @@ async def get_viral_videos(celeb_id: str, kind: str = "video", refresh: bool = F
     if cache and not refresh:
         try:
             fetched = datetime.fromisoformat(cache["fetched_at"])
-            if (datetime.now(timezone.utc) - fetched).total_seconds() > 86400:
+            # Refresh every 6 hours
+            if (datetime.now(timezone.utc) - fetched).total_seconds() > 21600:
                 needs_refresh = True
         except Exception:
             needs_refresh = True
@@ -900,7 +903,7 @@ async def get_viral_videos(celeb_id: str, kind: str = "video", refresh: bool = F
         all_top = []
         loop = asyncio.get_event_loop()
         for ch_id in channels:
-            vids = await loop.run_in_executor(None, lambda c=ch_id: fetch_top_viewed_from_channel(c, max_results=100))
+            vids = await loop.run_in_executor(None, lambda c=ch_id: fetch_top_viewed_from_channel(c, max_results=200))
             all_top.extend(vids)
         channel_subs = celeb.get("subscriber_count", 1)
         for v in all_top:
@@ -916,7 +919,7 @@ async def get_viral_videos(celeb_id: str, kind: str = "video", refresh: bool = F
                 continue
             seen.add(v["video_id"])
             filtered.append(v)
-        filtered = filtered[:100]
+        filtered = filtered[:200]
         await db.viral_cache.update_one(
             {"_key": cache_key},
             {"$set": {
@@ -1042,6 +1045,8 @@ async def refresh_all():
     for c in celebs:
         if c.get("youtube_channel_id") or c.get("secondary_channels"):
             await refresh_celebrity_videos(c["id"], notify=True)
+            # Also reset viral cache so next load re-scans the whole channel
+            await db.viral_cache.delete_many({"celebrity_id": c["id"]})
     return {"ok": True, "refreshed": len(celebs)}
 
 
