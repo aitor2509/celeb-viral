@@ -555,7 +555,7 @@ async def get_celebrity_videos(celeb_id: str, kind: str = "video", sort: str = "
     is_short = kind == "short"
     query = {"celebrity_id": celeb_id, "is_short": is_short}
     sort_key = "view_count" if sort == "viral" else "published_at"
-    videos = await db.videos.find(query, {"_id": 0}).sort(sort_key, -1).to_list(100)
+    videos = await db.videos.find(query, {"_id": 0}).sort(sort_key, -1).to_list(200)
     return {"videos": videos}
 
 
@@ -607,138 +607,74 @@ async def update_trending_context(celeb_id: str, payload: TrendingContextUpdate)
 
 # ===== MODELO HÍBRIDO DE RECOMENDACIONES =====
 #
-# Cómo funciona:
-#   CAPA 1 – Algoritmo propio (70% del score final)
-#     • viral_score ya calculado (vistas, likes, engagement, velocidad, recencia)
-#     • trend_keyword_score: detecta si el título/descripción contiene keywords
-#       que el community manager puso en "contexto trending"
-#     • resurrection_score: videos viejos cuyo tema coincide con tendencias actuales
-#     • recency_boost: premio extra a videos de los últimos 14 días con buen score
-#   CAPA 2 – IA (30% del score final) solo para redactar razones y predicciones
-#     La IA NO decide el ranking, solo explica los resultados del algoritmo.
+# 30 videos divididos en 3 categorías de 10:
+#   CATEGORÍA A – Recientes con potencial (últimos videos + buenas stats)
+#   CATEGORÍA B – Virales históricos (los más vistos de todo el canal)
+#   CATEGORÍA C – Tendencias (videos cuyo tema coincide con lo que está pasando HOY)
 #
-# Score final: 0-30 puntos (igual que pediste)
-# ================================================
+# El algoritmo ordena cada categoría. La IA solo redacta razones.
+# ===============================================================
 
 import math as _math
 
 def _tokenize(text: str) -> set:
-    """Lowercase words from a text, for keyword matching."""
     import re as _re
     return set(_re.sub(r"[^\w\s]", " ", text.lower()).split())
 
-
-def _trend_keyword_score(video: dict, trend_keywords: list) -> float:
-    """
-    0-10 pts. Counts how many trend keywords appear in title+description.
-    More matches = higher score. Exact substring match (handles Spanish phrases).
-    """
-    if not trend_keywords:
-        return 0.0
-    haystack = (video.get("title", "") + " " + video.get("description", "")[:300]).lower()
-    hits = sum(1 for kw in trend_keywords if kw.lower() in haystack)
-    # log scale: 1 hit=4pts, 2=7pts, 3+=10pts
-    if hits == 0:
-        return 0.0
-    return min(10.0, 3.5 * _math.log2(hits + 1) + 2)
-
-
-def _resurrection_score(video: dict, trend_keywords: list) -> float:
-    """
-    0-8 pts extra. For OLD videos (>60 days) whose topic matches current trends.
-    This is the 'Franco habla de BTS' pattern.
-    """
-    if not trend_keywords:
-        return 0.0
-    try:
-        pub = video.get("published_at", "")
-        pub_dt = datetime.fromisoformat(pub.replace("Z", "+00:00"))
-        days_old = (datetime.now(timezone.utc) - pub_dt).total_seconds() / 86400
-    except Exception:
-        days_old = 0
-    if days_old < 60:
-        return 0.0  # not old enough to be a resurrection
-    haystack = (video.get("title", "") + " " + video.get("description", "")[:300]).lower()
-    hits = sum(1 for kw in trend_keywords if kw.lower() in haystack)
-    if hits == 0:
-        return 0.0
-    # Old video + trending topic = resurrection bonus
-    return min(8.0, hits * 3.5)
-
-
-def _recency_boost(video: dict) -> float:
-    """
-    0-5 pts. Prize for very recent videos (<14 days) that already have decent stats.
-    """
-    try:
-        pub = video.get("published_at", "")
-        pub_dt = datetime.fromisoformat(pub.replace("Z", "+00:00"))
-        days_old = (datetime.now(timezone.utc) - pub_dt).total_seconds() / 86400
-    except Exception:
-        return 0.0
-    if days_old > 14:
-        return 0.0
-    return max(0.0, 5.0 - (days_old / 2.8))
-
-
-def compute_hybrid_score(video: dict, trend_keywords: list) -> dict:
-    """
-    Returns a dict with the final 0-30 score and sub-scores for transparency.
-    Breakdown:
-      viral_base    0-10  (normalized from viral_score 0-100)
-      trend_kw      0-10  (keyword match with trending context)
-      resurrection  0-8   (old video + current trend = resurgimiento)
-      recency       0-5   (bonus for recent videos)
-      penalty       0-3   (penalty for very low engagement)
-    Total cap: 30
-    """
-    viral_base = min(10.0, (video.get("viral_score", 0) / 100) * 10)
-    trend_kw = _trend_keyword_score(video, trend_keywords)
-    resurrection = _resurrection_score(video, trend_keywords)
-    recency = _recency_boost(video)
-    # Small penalty for videos with almost no views relative to channel
-    views = video.get("view_count", 0)
-    penalty = 2.0 if views < 1000 else (1.0 if views < 5000 else 0.0)
-
-    total = viral_base + trend_kw + resurrection + recency - penalty
-    total = max(0.0, min(30.0, total))
-
-    return {
-        "hybrid_score": round(total, 1),
-        "breakdown": {
-            "viral_base": round(viral_base, 1),
-            "trend_keyword": round(trend_kw, 1),
-            "resurrection": round(resurrection, 1),
-            "recency_boost": round(recency, 1),
-            "penalty": round(penalty, 1),
-        }
-    }
-
-
 def _extract_trend_keywords(trending_context: str) -> list:
-    """
-    Splits the free-text trending context into usable keywords/phrases.
-    Keeps multi-word phrases (e.g. 'Cruz Azul') as single tokens.
-    """
     if not trending_context:
         return []
     import re as _re
-    # Split by comma, newline, semicolon, or period
     parts = _re.split(r"[,\n;.]", trending_context)
-    keywords = []
-    for p in parts:
-        kw = p.strip()
-        if len(kw) >= 3:
-            keywords.append(kw)
-    return keywords
+    return [p.strip() for p in parts if len(p.strip()) >= 3]
+
+def _matches_trends(video: dict, trend_keywords: list) -> float:
+    """Returns 0-1 score of how well a video matches trend keywords."""
+    if not trend_keywords:
+        return 0.0
+    haystack = (video.get("title", "") + " " + video.get("description", "")[:300]).lower()
+    hits = sum(1 for kw in trend_keywords if kw.lower() in haystack)
+    return min(1.0, hits / max(len(trend_keywords), 1) * 3)
+
+def _recency_score(video: dict) -> float:
+    """Score based purely on how recent the video is (0-1)."""
+    try:
+        pub = video.get("published_at", "")
+        pub_dt = datetime.fromisoformat(pub.replace("Z", "+00:00"))
+        days_old = (datetime.now(timezone.utc) - pub_dt).total_seconds() / 86400
+        return max(0.0, 1.0 - (days_old / 90))  # 0 days=1.0, 90 days=0.0
+    except Exception:
+        return 0.0
+
+def _potential_score(video: dict, channel_subs: int) -> float:
+    """Score for recent videos with growth potential (0-1)."""
+    views = max(int(video.get("view_count", 0)), 0)
+    likes = max(int(video.get("like_count", 0)), 0)
+    comments = max(int(video.get("comment_count", 0)), 0)
+    subs = max(int(channel_subs or 1), 1)
+    try:
+        pub = video.get("published_at", "")
+        pub_dt = datetime.fromisoformat(pub.replace("Z", "+00:00"))
+        days_old = max((datetime.now(timezone.utc) - pub_dt).total_seconds() / 86400, 0.5)
+    except Exception:
+        days_old = 30
+    velocity = views / days_old
+    reach = views / subs
+    eng = (likes + comments * 3) / max(views, 1)
+    # Combine velocity + engagement + reach, normalize to 0-1
+    v_score = min(1.0, _math.log10(max(velocity, 1)) / 5)
+    e_score = min(1.0, eng * 20)
+    r_score = min(1.0, _math.log10(max(reach * 100, 1)) / 4)
+    return (v_score * 0.5 + e_score * 0.3 + r_score * 0.2)
 
 
 @api_router.post("/celebrities/{celeb_id}/recommendations")
 async def get_hybrid_recommendations(celeb_id: str, kind: str = "video"):
     """
-    Modelo híbrido: algoritmo propio (70%) + IA para redactar razones (30%).
-    El RANKING lo decide el algoritmo. La IA solo explica y predice.
-    Score final: 0-30 pts.
+    30 recomendaciones en 3 categorías de 10:
+    - CAT A: 10 videos recientes con potencial
+    - CAT B: 10 virales históricos del canal
+    - CAT C: 10 por tendencias (tema coincide con contexto trending)
     """
     celeb = await db.celebrities.find_one({"id": celeb_id}, {"_id": 0})
     if not celeb:
@@ -747,112 +683,134 @@ async def get_hybrid_recommendations(celeb_id: str, kind: str = "video"):
     is_short = kind == "short"
     trending_context = celeb.get("trending_context", "").strip()
     trend_keywords = _extract_trend_keywords(trending_context)
+    channel_subs = celeb.get("subscriber_count", 1)
 
-    # --- CAPA 1: Recolectar videos (recientes + virales históricos) ---
-    recent_videos = await db.videos.find(
+    # --- Obtener todos los videos disponibles ---
+    all_recent = await db.videos.find(
         {"celebrity_id": celeb_id, "is_short": is_short}, {"_id": 0}
-    ).sort("published_at", -1).to_list(60)
+    ).sort("published_at", -1).to_list(200)
 
     viral_cache = await db.viral_cache.find_one({"_key": f"{celeb_id}:{kind}"}, {"_id": 0})
-    viral_videos = viral_cache.get("videos", [])[:25] if viral_cache else []
+    viral_videos = viral_cache.get("videos", []) if viral_cache else []
 
+    # Pool completo sin duplicados
     seen_ids = set()
     all_videos = []
-    for v in viral_videos + recent_videos:
+    for v in all_recent + viral_videos:
         if v["video_id"] not in seen_ids:
             seen_ids.add(v["video_id"])
             all_videos.append(v)
 
     if not all_videos:
-        return {"recommendations": [], "strategy": "No hay videos para analizar.", "trending_patterns": ""}
+        return {"recommendations": [], "categories": {}, "strategy": "No hay videos para analizar."}
 
-    # --- CAPA 2: Calcular score híbrido para cada video ---
-    scored = []
-    for v in all_videos:
-        result = compute_hybrid_score(v, trend_keywords)
-        scored.append({
-            **v,
-            "final_score": result["hybrid_score"],
-            "score_breakdown": result["breakdown"],
-        })
+    # --- CATEGORÍA A: Recientes con potencial ---
+    # Solo videos de los últimos 90 días, ordenados por potencial
+    recent_pool = [v for v in all_videos if _recency_score(v) > 0.05]
+    recent_pool.sort(key=lambda v: _potential_score(v, channel_subs) * 0.6 + _recency_score(v) * 0.4, reverse=True)
+    cat_a = recent_pool[:10]
+    cat_a_ids = {v["video_id"] for v in cat_a}
 
-    # Sort by hybrid score, take top 15 for IA to narrate
-    scored.sort(key=lambda x: x["final_score"], reverse=True)
-    top_candidates = scored[:15]
-    top_10 = scored[:10]
+    # --- CATEGORÍA B: Virales históricos ---
+    # Los más vistos de todo el canal, excluyendo los ya en cat_a
+    historical_pool = sorted(all_videos, key=lambda v: v.get("view_count", 0), reverse=True)
+    cat_b = [v for v in historical_pool if v["video_id"] not in cat_a_ids][:10]
+    cat_b_ids = {v["video_id"] for v in cat_b}
 
-    # --- CAPA 3: IA redacta razones y predicciones (no decide el ranking) ---
+    # --- CATEGORÍA C: Por tendencias ---
+    # Videos cuyo título/descripción conecta con las tendencias actuales
+    # Incluye videos viejos que "resurgen" por el tema (efecto BTS/Franco)
+    excluded_ids = cat_a_ids | cat_b_ids
+    if trend_keywords:
+        trend_pool = [v for v in all_videos if v["video_id"] not in excluded_ids]
+        trend_pool.sort(key=lambda v: _matches_trends(v, trend_keywords) * 0.7 + _potential_score(v, channel_subs) * 0.3, reverse=True)
+        cat_c = [v for v in trend_pool if _matches_trends(v, trend_keywords) > 0][:10]
+        # Si no hay suficientes con match, completar con los de mayor potencial restantes
+        if len(cat_c) < 10:
+            remaining = [v for v in trend_pool if v not in cat_c]
+            cat_c += remaining[:10 - len(cat_c)]
+    else:
+        # Sin tendencias definidas, usar los de mayor engagement relativo
+        trend_pool = sorted(
+            [v for v in all_videos if v["video_id"] not in excluded_ids],
+            key=lambda v: _potential_score(v, channel_subs), reverse=True
+        )
+        cat_c = trend_pool[:10]
+
+    # --- Llamar a IA para redactar razones (no decide el ranking) ---
     api_key = os.environ.get("GROQ_API_KEY")
-    ai_explanations = {}
+    ai_reasons = {}
     overall_strategy = ""
-    trending_patterns = ""
 
-    if api_key and top_candidates:
-        kind_label = "Shorts" if is_short else "videos largos/podcasts"
-        candidates_txt = "\n".join([
-            f"{i+1}. [id:{v['video_id']}] \"{v['title']}\" | score:{v['final_score']}/30 "
-            f"(viral_base:{v['score_breakdown']['viral_base']} trend_kw:{v['score_breakdown']['trend_keyword']} "
-            f"resurrection:{v['score_breakdown']['resurrection']} recency:{v['score_breakdown']['recency_boost']}) "
-            f"| {v['view_count']:,} vistas | {v['published_at'][:10]}"
-            for i, v in enumerate(top_candidates)
-        ])
+    if api_key:
+        def _fmt(v, cat_label):
+            return f"[{cat_label}][id:{v['video_id']}] \"{v['title']}\" · {v.get('view_count',0):,} vistas · {v['published_at'][:10]}"
+
+        candidates_txt = "\n".join(
+            [_fmt(v, "RECIENTE") for v in cat_a] +
+            [_fmt(v, "VIRAL_HISTORICO") for v in cat_b] +
+            [_fmt(v, "TENDENCIA") for v in cat_c]
+        )
+        kind_label = "Shorts" if is_short else "videos largos"
         system_msg = (
-            "Eres un experto en marketing digital latinoamericano. "
-            "Te doy una lista de videos YA RANKEADOS por un algoritmo de scoring. "
-            "Tu trabajo: redactar explicaciones breves y predicciones para cada video. "
-            "NO cambies el orden. Solo explica. Responde en JSON válido sin markdown."
+            "Eres experto en marketing digital latinoamericano. "
+            "Te doy 30 videos YA CATEGORIZADOS por un algoritmo. "
+            "Tu trabajo: escribir una razón corta (1-2 frases) y una predicción para cada uno. "
+            "Responde SOLO JSON válido, sin markdown."
         )
         user_text = (
             f"Personaje: {celeb['name']} | Tipo: {kind_label}\n"
-            f"Tendencias actuales: {trending_context or '(México/LATAM en general)'}\n"
-            f"Keywords detectados: {', '.join(trend_keywords) if trend_keywords else 'ninguno'}\n\n"
-            f"VIDEOS RANKEADOS POR ALGORITMO (no cambies el orden):\n{candidates_txt}\n\n"
-            f"Devuelve JSON EXACTO:\n"
-            f'[{{"video_id":"...","reason":"por qué funciona ahora (2 frases)","trend_match":"qué red social o tendencia conecta","prediction":"resultado esperado si se sube hoy"}}]\n'
-            f"Y también devuelve al final: {{{{'overall_strategy':'3 frases de estrategia','trending_patterns':'patrones de redes que aprovechamos'}}}}\n"
-            f"Formato final: {{\"explanations\":[...], \"overall_strategy\":\"...\", \"trending_patterns\":\"...\"}}"
+            f"Tendencias: {trending_context or '(México/LATAM en general)'}\n\n"
+            f"VIDEOS (30 en total, 3 categorías):\n{candidates_txt}\n\n"
+            f"Devuelve JSON:\n"
+            f'{{"reasons":[{{"video_id":"...","reason":"...","prediction":"..."}}],"overall_strategy":"..."}}\n'
+            f"Una entrada por video_id."
         )
         try:
             groq_client = Groq(api_key=api_key)
-            message = groq_client.chat.completions.create(
+            msg = groq_client.chat.completions.create(
                 model="llama-3.3-70b-versatile",
-                max_tokens=2500,
-                messages=[
-                    {"role": "system", "content": system_msg},
-                    {"role": "user", "content": user_text},
-                ]
+                max_tokens=3000,
+                messages=[{"role": "system", "content": system_msg}, {"role": "user", "content": user_text}]
             )
-            raw = message.choices[0].message.content.strip()
+            raw = msg.choices[0].message.content.strip()
             match = re.search(r"\{.*\}", raw, re.DOTALL)
             if match:
                 parsed = json.loads(match.group(0))
-                for exp in parsed.get("explanations", []):
-                    ai_explanations[exp.get("video_id", "")] = exp
+                for r in parsed.get("reasons", []):
+                    ai_reasons[r.get("video_id", "")] = r
                 overall_strategy = parsed.get("overall_strategy", "")
-                trending_patterns = parsed.get("trending_patterns", "")
         except Exception as e:
-            logging.warning(f"IA explanation failed (algorithm ranking still works): {e}")
+            logging.warning(f"IA reasons failed (algorithm still works): {e}")
 
-    # --- CAPA 4: Combinar resultado final ---
-    recommendations = []
-    for v in top_10:
-        exp = ai_explanations.get(v["video_id"], {})
-        recommendations.append({
-            "video_id": v["video_id"],
-            "score": v["final_score"],          # 0-30, del algoritmo
-            "score_breakdown": v["score_breakdown"],
-            "reason": exp.get("reason", f"Score algorítmico: {v['final_score']}/30 · viral_base={v['score_breakdown']['viral_base']} trend={v['score_breakdown']['trend_keyword']} resurrección={v['score_breakdown']['resurrection']}"),
-            "trend_match": exp.get("trend_match", ", ".join(trend_keywords[:3]) if trend_keywords else "—"),
-            "prediction": exp.get("prediction", ""),
-            "video": {k: val for k, val in v.items() if k not in ("score_breakdown", "final_score")},
-        })
+    # --- Construir respuesta final ---
+    def _build(videos, category_label, category_key):
+        result = []
+        for v in videos:
+            exp = ai_reasons.get(v["video_id"], {})
+            result.append({
+                "video_id": v["video_id"],
+                "category": category_key,
+                "category_label": category_label,
+                "reason": exp.get("reason", ""),
+                "prediction": exp.get("prediction", ""),
+                "trend_match": ", ".join(trend_keywords[:3]) if category_key == "trend" and trend_keywords else "—",
+                "video": v,
+            })
+        return result
+
+    recommendations = (
+        _build(cat_a, "🔴 Reciente con potencial", "recent") +
+        _build(cat_b, "🟡 Viral histórico del canal", "viral") +
+        _build(cat_c, "🟢 Por tendencias / resurrección", "trend")
+    )
 
     return {
         "recommendations": recommendations,
         "strategy": overall_strategy,
-        "trending_patterns": trending_patterns,
         "trend_keywords_used": trend_keywords,
-        "model": "hybrid_v1",  # flag para el frontend
+        "counts": {"recent": len(cat_a), "viral": len(cat_b), "trend": len(cat_c)},
+        "model": "hybrid_v2",
     }
 
 
@@ -942,7 +900,7 @@ async def get_viral_videos(celeb_id: str, kind: str = "video", refresh: bool = F
         all_top = []
         loop = asyncio.get_event_loop()
         for ch_id in channels:
-            vids = await loop.run_in_executor(None, lambda c=ch_id: fetch_top_viewed_from_channel(c, max_results=50))
+            vids = await loop.run_in_executor(None, lambda c=ch_id: fetch_top_viewed_from_channel(c, max_results=100))
             all_top.extend(vids)
         channel_subs = celeb.get("subscriber_count", 1)
         for v in all_top:
@@ -958,7 +916,7 @@ async def get_viral_videos(celeb_id: str, kind: str = "video", refresh: bool = F
                 continue
             seen.add(v["video_id"])
             filtered.append(v)
-        filtered = filtered[:50]
+        filtered = filtered[:100]
         await db.viral_cache.update_one(
             {"_key": cache_key},
             {"$set": {
