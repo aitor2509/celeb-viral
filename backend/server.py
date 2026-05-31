@@ -162,7 +162,7 @@ async def fetch_channel_info(channel_id: str):
         return None
 
 
-async def fetch_latest_videos(channel_id: str, max_results: int = 50):
+async def fetch_latest_videos(channel_id: str, max_results: int = 100):
     """Fetch latest videos from a channel using the uploads playlist (paginated up to max_results)."""
     try:
         yt = yt_service()
@@ -463,7 +463,8 @@ async def add_celebrity(payload: CelebrityCreate):
         video_count=info["video_count"] if info else 0,
     )
     await db.celebrities.insert_one(celeb.model_dump())
-    asyncio.create_task(refresh_celebrity_videos(celeb.id, payload.youtube_channel_id, notify=False))
+    # Fetch all videos for the new celebrity (full channel scan)
+    asyncio.create_task(refresh_celebrity_videos(celeb.id, notify=False))
     return celeb
 
 
@@ -504,7 +505,7 @@ async def refresh_celebrity_videos(celeb_id: str, channel_id: str = None, notify
     had_previous = len(existing_ids) > 0
     all_new = []
     for ch_id in channels_to_fetch:
-        videos = await fetch_latest_videos(ch_id, max_results=60)
+        videos = await fetch_latest_videos(ch_id, max_results=100)
         # compute viral score per video using main channel subs
         channel_subs = celeb.get("subscriber_count", 1)
         for v in videos:
@@ -554,7 +555,7 @@ async def get_celebrity_videos(celeb_id: str, kind: str = "video", sort: str = "
     is_short = kind == "short"
     query = {"celebrity_id": celeb_id, "is_short": is_short}
     sort_key = "view_count" if sort == "viral" else "published_at"
-    videos = await db.videos.find(query, {"_id": 0}).sort(sort_key, -1).to_list(50)
+    videos = await db.videos.find(query, {"_id": 0}).sort(sort_key, -1).to_list(100)
     return {"videos": videos}
 
 
@@ -604,77 +605,255 @@ async def update_trending_context(celeb_id: str, payload: TrendingContextUpdate)
     return {"ok": True}
 
 
-# ===== AI Recommendations =====
+# ===== MODELO HÍBRIDO DE RECOMENDACIONES =====
+#
+# Cómo funciona:
+#   CAPA 1 – Algoritmo propio (70% del score final)
+#     • viral_score ya calculado (vistas, likes, engagement, velocidad, recencia)
+#     • trend_keyword_score: detecta si el título/descripción contiene keywords
+#       que el community manager puso en "contexto trending"
+#     • resurrection_score: videos viejos cuyo tema coincide con tendencias actuales
+#     • recency_boost: premio extra a videos de los últimos 14 días con buen score
+#   CAPA 2 – IA (30% del score final) solo para redactar razones y predicciones
+#     La IA NO decide el ranking, solo explica los resultados del algoritmo.
+#
+# Score final: 0-30 puntos (igual que pediste)
+# ================================================
+
+import math as _math
+
+def _tokenize(text: str) -> set:
+    """Lowercase words from a text, for keyword matching."""
+    import re as _re
+    return set(_re.sub(r"[^\w\s]", " ", text.lower()).split())
+
+
+def _trend_keyword_score(video: dict, trend_keywords: list) -> float:
+    """
+    0-10 pts. Counts how many trend keywords appear in title+description.
+    More matches = higher score. Exact substring match (handles Spanish phrases).
+    """
+    if not trend_keywords:
+        return 0.0
+    haystack = (video.get("title", "") + " " + video.get("description", "")[:300]).lower()
+    hits = sum(1 for kw in trend_keywords if kw.lower() in haystack)
+    # log scale: 1 hit=4pts, 2=7pts, 3+=10pts
+    if hits == 0:
+        return 0.0
+    return min(10.0, 3.5 * _math.log2(hits + 1) + 2)
+
+
+def _resurrection_score(video: dict, trend_keywords: list) -> float:
+    """
+    0-8 pts extra. For OLD videos (>60 days) whose topic matches current trends.
+    This is the 'Franco habla de BTS' pattern.
+    """
+    if not trend_keywords:
+        return 0.0
+    try:
+        pub = video.get("published_at", "")
+        pub_dt = datetime.fromisoformat(pub.replace("Z", "+00:00"))
+        days_old = (datetime.now(timezone.utc) - pub_dt).total_seconds() / 86400
+    except Exception:
+        days_old = 0
+    if days_old < 60:
+        return 0.0  # not old enough to be a resurrection
+    haystack = (video.get("title", "") + " " + video.get("description", "")[:300]).lower()
+    hits = sum(1 for kw in trend_keywords if kw.lower() in haystack)
+    if hits == 0:
+        return 0.0
+    # Old video + trending topic = resurrection bonus
+    return min(8.0, hits * 3.5)
+
+
+def _recency_boost(video: dict) -> float:
+    """
+    0-5 pts. Prize for very recent videos (<14 days) that already have decent stats.
+    """
+    try:
+        pub = video.get("published_at", "")
+        pub_dt = datetime.fromisoformat(pub.replace("Z", "+00:00"))
+        days_old = (datetime.now(timezone.utc) - pub_dt).total_seconds() / 86400
+    except Exception:
+        return 0.0
+    if days_old > 14:
+        return 0.0
+    return max(0.0, 5.0 - (days_old / 2.8))
+
+
+def compute_hybrid_score(video: dict, trend_keywords: list) -> dict:
+    """
+    Returns a dict with the final 0-30 score and sub-scores for transparency.
+    Breakdown:
+      viral_base    0-10  (normalized from viral_score 0-100)
+      trend_kw      0-10  (keyword match with trending context)
+      resurrection  0-8   (old video + current trend = resurgimiento)
+      recency       0-5   (bonus for recent videos)
+      penalty       0-3   (penalty for very low engagement)
+    Total cap: 30
+    """
+    viral_base = min(10.0, (video.get("viral_score", 0) / 100) * 10)
+    trend_kw = _trend_keyword_score(video, trend_keywords)
+    resurrection = _resurrection_score(video, trend_keywords)
+    recency = _recency_boost(video)
+    # Small penalty for videos with almost no views relative to channel
+    views = video.get("view_count", 0)
+    penalty = 2.0 if views < 1000 else (1.0 if views < 5000 else 0.0)
+
+    total = viral_base + trend_kw + resurrection + recency - penalty
+    total = max(0.0, min(30.0, total))
+
+    return {
+        "hybrid_score": round(total, 1),
+        "breakdown": {
+            "viral_base": round(viral_base, 1),
+            "trend_keyword": round(trend_kw, 1),
+            "resurrection": round(resurrection, 1),
+            "recency_boost": round(recency, 1),
+            "penalty": round(penalty, 1),
+        }
+    }
+
+
+def _extract_trend_keywords(trending_context: str) -> list:
+    """
+    Splits the free-text trending context into usable keywords/phrases.
+    Keeps multi-word phrases (e.g. 'Cruz Azul') as single tokens.
+    """
+    if not trending_context:
+        return []
+    import re as _re
+    # Split by comma, newline, semicolon, or period
+    parts = _re.split(r"[,\n;.]", trending_context)
+    keywords = []
+    for p in parts:
+        kw = p.strip()
+        if len(kw) >= 3:
+            keywords.append(kw)
+    return keywords
+
+
 @api_router.post("/celebrities/{celeb_id}/recommendations")
-async def get_ai_recommendations(celeb_id: str, kind: str = "video"):
-    """Use Claude Sonnet 4.5 to recommend which videos to upload to Facebook."""
+async def get_hybrid_recommendations(celeb_id: str, kind: str = "video"):
+    """
+    Modelo híbrido: algoritmo propio (70%) + IA para redactar razones (30%).
+    El RANKING lo decide el algoritmo. La IA solo explica y predice.
+    Score final: 0-30 pts.
+    """
     celeb = await db.celebrities.find_one({"id": celeb_id}, {"_id": 0})
     if not celeb:
         raise HTTPException(status_code=404, detail="Celebrity not found")
-    api_key = os.environ.get('GROQ_API_KEY')
-    if not api_key:
-        raise HTTPException(status_code=500, detail="LLM key not configured")
+
     is_short = kind == "short"
-    videos = await db.videos.find(
-        {"celebrity_id": celeb_id, "is_short": is_short},
-        {"_id": 0},
-    ).sort("published_at", -1).to_list(40)
-    if not videos:
-        return {"recommendations": [], "reasoning": "No hay videos para analizar."}
     trending_context = celeb.get("trending_context", "").strip()
-    # Build prompt
-    videos_list = "\n".join([
-        f"{i+1}. [id:{v['video_id']}] \"{v['title']}\" · {v['view_count']:,} views · {v['published_at'][:10]}"
-        for i, v in enumerate(videos[:30])
-    ])
-    kind_label = "Shorts (videos cortos verticales)" if is_short else "videos largos / podcasts"
-    system_msg = (
-        "Eres un experto en marketing de redes sociales latinoamericanas trabajando para Meta Business. "
-        "Analizas contenido de YouTube de personajes latinos y recomiendas qué subir a Facebook AHORA mismo "
-        "para maximizar engagement. Considera: temas trending en Latinoamérica/México, controversia, "
-        "humor cultural, relevancia actual (política, farándula, virales), y potencial de viralidad en Facebook. "
-        "Respondes SIEMPRE en JSON válido."
-    )
-    user_text = (
-        f"Personaje: {celeb['name']}\n"
-        f"Tipo de contenido a recomendar: {kind_label}\n\n"
-        f"TEMAS TRENDING ACTUALES (proporcionados por el community manager):\n"
-        f"{trending_context if trending_context else '(no especificados - usa tu conocimiento general de tendencias actuales)'}\n\n"
-        f"LISTA DE VIDEOS DISPONIBLES (más recientes primero):\n{videos_list}\n\n"
-        f"Devuelve un JSON con esta estructura EXACTA (sin markdown, solo JSON puro):\n"
-        f'{{"recommendations": [{{"video_id": "...", "score": 0-100, "reason": "razón breve en español (1-2 frases)"}}], "overall_strategy": "estrategia general 2-3 frases"}}\n'
-        f"Selecciona los TOP 5 más recomendados, ordenados por score descendente. Sé crítico y específico."
-    )
-    try:
-        groq_client = Groq(api_key=api_key)
-        message = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            max_tokens=1000,
-            messages=[
-                {"role": "system", "content": system_msg},
-                {"role": "user", "content": user_text}
-            ]
+    trend_keywords = _extract_trend_keywords(trending_context)
+
+    # --- CAPA 1: Recolectar videos (recientes + virales históricos) ---
+    recent_videos = await db.videos.find(
+        {"celebrity_id": celeb_id, "is_short": is_short}, {"_id": 0}
+    ).sort("published_at", -1).to_list(60)
+
+    viral_cache = await db.viral_cache.find_one({"_key": f"{celeb_id}:{kind}"}, {"_id": 0})
+    viral_videos = viral_cache.get("videos", [])[:25] if viral_cache else []
+
+    seen_ids = set()
+    all_videos = []
+    for v in viral_videos + recent_videos:
+        if v["video_id"] not in seen_ids:
+            seen_ids.add(v["video_id"])
+            all_videos.append(v)
+
+    if not all_videos:
+        return {"recommendations": [], "strategy": "No hay videos para analizar.", "trending_patterns": ""}
+
+    # --- CAPA 2: Calcular score híbrido para cada video ---
+    scored = []
+    for v in all_videos:
+        result = compute_hybrid_score(v, trend_keywords)
+        scored.append({
+            **v,
+            "final_score": result["hybrid_score"],
+            "score_breakdown": result["breakdown"],
+        })
+
+    # Sort by hybrid score, take top 15 for IA to narrate
+    scored.sort(key=lambda x: x["final_score"], reverse=True)
+    top_candidates = scored[:15]
+    top_10 = scored[:10]
+
+    # --- CAPA 3: IA redacta razones y predicciones (no decide el ranking) ---
+    api_key = os.environ.get("GROQ_API_KEY")
+    ai_explanations = {}
+    overall_strategy = ""
+    trending_patterns = ""
+
+    if api_key and top_candidates:
+        kind_label = "Shorts" if is_short else "videos largos/podcasts"
+        candidates_txt = "\n".join([
+            f"{i+1}. [id:{v['video_id']}] \"{v['title']}\" | score:{v['final_score']}/30 "
+            f"(viral_base:{v['score_breakdown']['viral_base']} trend_kw:{v['score_breakdown']['trend_keyword']} "
+            f"resurrection:{v['score_breakdown']['resurrection']} recency:{v['score_breakdown']['recency_boost']}) "
+            f"| {v['view_count']:,} vistas | {v['published_at'][:10]}"
+            for i, v in enumerate(top_candidates)
+        ])
+        system_msg = (
+            "Eres un experto en marketing digital latinoamericano. "
+            "Te doy una lista de videos YA RANKEADOS por un algoritmo de scoring. "
+            "Tu trabajo: redactar explicaciones breves y predicciones para cada video. "
+            "NO cambies el orden. Solo explica. Responde en JSON válido sin markdown."
         )
-        response = message.choices[0].message.content
-        # Parse JSON from response
-        text = response.strip()
-        # try to find json
-        match = re.search(r'\{.*\}', text, re.DOTALL)
-        if match:
-            data = json.loads(match.group(0))
-        else:
-            data = {"recommendations": [], "overall_strategy": text[:300]}
-        # Attach video details
-        video_map = {v["video_id"]: v for v in videos}
-        enriched = []
-        for r in data.get("recommendations", []):
-            vid = video_map.get(r.get("video_id"))
-            if vid:
-                enriched.append({**r, "video": vid})
-        return {"recommendations": enriched, "strategy": data.get("overall_strategy", "")}
-    except Exception as e:
-        logging.error(f"AI recommendation error: {e}")
-        raise HTTPException(status_code=500, detail=f"Error en IA: {str(e)}")
+        user_text = (
+            f"Personaje: {celeb['name']} | Tipo: {kind_label}\n"
+            f"Tendencias actuales: {trending_context or '(México/LATAM en general)'}\n"
+            f"Keywords detectados: {', '.join(trend_keywords) if trend_keywords else 'ninguno'}\n\n"
+            f"VIDEOS RANKEADOS POR ALGORITMO (no cambies el orden):\n{candidates_txt}\n\n"
+            f"Devuelve JSON EXACTO:\n"
+            f'[{{"video_id":"...","reason":"por qué funciona ahora (2 frases)","trend_match":"qué red social o tendencia conecta","prediction":"resultado esperado si se sube hoy"}}]\n'
+            f"Y también devuelve al final: {{{{'overall_strategy':'3 frases de estrategia','trending_patterns':'patrones de redes que aprovechamos'}}}}\n"
+            f"Formato final: {{\"explanations\":[...], \"overall_strategy\":\"...\", \"trending_patterns\":\"...\"}}"
+        )
+        try:
+            groq_client = Groq(api_key=api_key)
+            message = groq_client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                max_tokens=2500,
+                messages=[
+                    {"role": "system", "content": system_msg},
+                    {"role": "user", "content": user_text},
+                ]
+            )
+            raw = message.choices[0].message.content.strip()
+            match = re.search(r"\{.*\}", raw, re.DOTALL)
+            if match:
+                parsed = json.loads(match.group(0))
+                for exp in parsed.get("explanations", []):
+                    ai_explanations[exp.get("video_id", "")] = exp
+                overall_strategy = parsed.get("overall_strategy", "")
+                trending_patterns = parsed.get("trending_patterns", "")
+        except Exception as e:
+            logging.warning(f"IA explanation failed (algorithm ranking still works): {e}")
+
+    # --- CAPA 4: Combinar resultado final ---
+    recommendations = []
+    for v in top_10:
+        exp = ai_explanations.get(v["video_id"], {})
+        recommendations.append({
+            "video_id": v["video_id"],
+            "score": v["final_score"],          # 0-30, del algoritmo
+            "score_breakdown": v["score_breakdown"],
+            "reason": exp.get("reason", f"Score algorítmico: {v['final_score']}/30 · viral_base={v['score_breakdown']['viral_base']} trend={v['score_breakdown']['trend_keyword']} resurrección={v['score_breakdown']['resurrection']}"),
+            "trend_match": exp.get("trend_match", ", ".join(trend_keywords[:3]) if trend_keywords else "—"),
+            "prediction": exp.get("prediction", ""),
+            "video": {k: val for k, val in v.items() if k not in ("score_breakdown", "final_score")},
+        })
+
+    return {
+        "recommendations": recommendations,
+        "strategy": overall_strategy,
+        "trending_patterns": trending_patterns,
+        "trend_keywords_used": trend_keywords,
+        "model": "hybrid_v1",  # flag para el frontend
+    }
 
 
 # ===== Google News scraping =====
@@ -779,7 +958,7 @@ async def get_viral_videos(celeb_id: str, kind: str = "video", refresh: bool = F
                 continue
             seen.add(v["video_id"])
             filtered.append(v)
-        filtered = filtered[:30]
+        filtered = filtered[:50]
         await db.viral_cache.update_one(
             {"_key": cache_key},
             {"$set": {
