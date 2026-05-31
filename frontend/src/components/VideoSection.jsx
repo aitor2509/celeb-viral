@@ -163,59 +163,66 @@ const VideoSection = ({ celebrity, kind, onCelebrityUpdate }) => {
                         </div>
                     )}
 
-                    {recommendations?.recommendations?.length > 0 && (
-                        <div className="space-y-3">
-                            {recommendations.recommendations.map((r, idx) => (
-                                <a
-                                    key={r.video.video_id}
-                                    href={r.video.url}
-                                    target="_blank"
-                                    rel="noreferrer"
-                                    data-testid={`${kind}-reco-item-${idx}`}
-                                    className="group flex gap-4 p-4 rounded-xl bg-[#111113] border border-white/10 hover:celeb-border transition"
-                                >
-                                    <div className="relative shrink-0">
-                                        <img src={r.video.thumbnail_url} alt="" className={`${kind === "short" ? "w-24 h-32" : "w-40 h-24"} rounded-lg object-cover`} />
-                                        <div
-                                            className="absolute -top-2 -left-2 w-9 h-9 rounded-full celeb-bg text-black font-display font-black flex items-center justify-center text-sm"
-                                        >
-                                            #{idx + 1}
-                                        </div>
-                                    </div>
-                                    <div className="flex-1 min-w-0">
-                                        <div className="flex items-center gap-2 mb-1">
-                                            <span className="text-[10px] uppercase tracking-widest font-bold celeb-text">
-                                                Score {r.score}/30
-                                            </span>
-                                            <div className="flex-1 h-1.5 rounded-full bg-white/10 overflow-hidden">
-                                                <div className="h-full celeb-bg" style={{ width: `${(r.score / 30) * 100}%` }} />
+                    {recommendations?.recommendations?.length > 0 && (() => {
+                        const cats = ["recent", "viral", "trend"];
+                        const catColors = { recent: "#FF3B30", viral: "#FACC15", trend: "#34D399" };
+                        const grouped = cats.reduce((acc, c) => {
+                            acc[c] = recommendations.recommendations.filter(r => r.category === c);
+                            return acc;
+                        }, {});
+                        return (
+                            <div className="space-y-8">
+                                {cats.map(catKey => {
+                                    const items = grouped[catKey];
+                                    if (!items || items.length === 0) return null;
+                                    const label = items[0].category_label;
+                                    const color = catColors[catKey];
+                                    return (
+                                        <div key={catKey}>
+                                            <div className="flex items-center gap-2 mb-3">
+                                                <div className="w-3 h-3 rounded-full" style={{ background: color }} />
+                                                <h3 className="font-bold text-sm text-white">{label}</h3>
+                                                <span className="text-[10px] text-white/30">{items.length} videos</span>
+                                            </div>
+                                            <div className="space-y-2">
+                                                {items.map((r, idx) => (
+                                                    <a
+                                                        key={r.video.video_id}
+                                                        href={r.video.url}
+                                                        target="_blank"
+                                                        rel="noreferrer"
+                                                        data-testid={`${kind}-reco-item-${catKey}-${idx}`}
+                                                        className="group flex gap-4 p-4 rounded-xl bg-[#111113] border border-white/10 hover:border-white/25 transition"
+                                                    >
+                                                        <div className="relative shrink-0">
+                                                            <img src={r.video.thumbnail_url} alt="" className={`${kind === "short" ? "w-20 h-28" : "w-36 h-20"} rounded-lg object-cover`} />
+                                                            <div className="absolute -top-2 -left-2 w-7 h-7 rounded-full text-black font-black flex items-center justify-center text-xs" style={{ background: color }}>
+                                                                {idx + 1}
+                                                            </div>
+                                                        </div>
+                                                        <div className="flex-1 min-w-0">
+                                                            <h4 className="font-semibold text-white text-sm line-clamp-2">{r.video.title}</h4>
+                                                            {r.reason && <p className="text-xs text-white/55 mt-1 line-clamp-2 leading-relaxed">{r.reason}</p>}
+                                                            {r.trend_match && r.trend_match !== "—" && (
+                                                                <p className="text-[10px] text-yellow-400/70 mt-1">📡 {r.trend_match}</p>
+                                                            )}
+                                                            {r.prediction && (
+                                                                <p className="text-[10px] text-green-400/70 mt-0.5">🔮 {r.prediction}</p>
+                                                            )}
+                                                            <div className="flex items-center gap-3 mt-1.5 text-[11px] text-white/35">
+                                                                <span className="flex items-center gap-1"><Eye className="w-3 h-3" /> {fmtNumber(r.video.view_count)}</span>
+                                                                <span>{timeAgo(r.video.published_at)}</span>
+                                                            </div>
+                                                        </div>
+                                                    </a>
+                                                ))}
                                             </div>
                                         </div>
-                                        {r.score_breakdown && (
-                                            <div className="flex gap-2 mb-2 flex-wrap">
-                                                <span className="text-[9px] px-1.5 py-0.5 rounded bg-white/5 text-white/40">viral {r.score_breakdown.viral_base}</span>
-                                                <span className="text-[9px] px-1.5 py-0.5 rounded bg-white/5 text-white/40">trend {r.score_breakdown.trend_keyword}</span>
-                                                <span className="text-[9px] px-1.5 py-0.5 rounded bg-white/5 text-white/40">resurrec. {r.score_breakdown.resurrection}</span>
-                                                <span className="text-[9px] px-1.5 py-0.5 rounded bg-white/5 text-white/40">reciente {r.score_breakdown.recency_boost}</span>
-                                            </div>
-                                        )}
-                                        <h4 className="font-semibold text-white text-sm line-clamp-2">{r.video.title}</h4>
-                                        <p className="text-xs text-white/60 mt-1.5 line-clamp-3 leading-relaxed">{r.reason}</p>
-                                        {r.trend_match && r.trend_match !== "—" && (
-                                            <p className="text-[10px] text-yellow-400/70 mt-1">📡 {r.trend_match}</p>
-                                        )}
-                                        {r.prediction && (
-                                            <p className="text-[10px] text-green-400/70 mt-0.5">🔮 {r.prediction}</p>
-                                        )}
-                                        <div className="flex items-center gap-3 mt-2 text-[11px] text-white/40">
-                                            <span className="flex items-center gap-1"><Eye className="w-3 h-3" /> {fmtNumber(r.video.view_count)}</span>
-                                            <span>{timeAgo(r.video.published_at)}</span>
-                                        </div>
-                                    </div>
-                                </a>
-                            ))}
-                        </div>
-                    )}
+                                    );
+                                })}
+                            </div>
+                        );
+                    })()}
                 </TabsContent>
             </Tabs>
 
