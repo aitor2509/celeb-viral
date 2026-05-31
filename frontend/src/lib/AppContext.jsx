@@ -42,15 +42,15 @@ export const AppProvider = ({ children }) => {
         document.documentElement.style.setProperty("--celebrity-color", selectedColor);
     }, [selectedColor]);
 
-    const markAllRead = async () => {
+    const markAllRead = useCallback(async () => {
         await api.post("/notifications/read-all");
         await loadNotifications();
-    };
+    }, [loadNotifications]);
 
-    const markRead = async (id) => {
+    const markRead = useCallback(async (id) => {
         await api.post(`/notifications/${id}/read`);
         await loadNotifications();
-    };
+    }, [loadNotifications]);
 
     const value = useMemo(() => ({
         celebrities,
@@ -63,7 +63,7 @@ export const AppProvider = ({ children }) => {
         markAllRead,
         markRead,
         loading,
-    }), [celebrities, notifications, unread, selectedColor, loadCelebrities, loadNotifications, loading]);
+    }), [celebrities, notifications, unread, selectedColor, loadCelebrities, loadNotifications, markAllRead, markRead, loading]);
 
     return (
         <AppCtx.Provider value={value}>
