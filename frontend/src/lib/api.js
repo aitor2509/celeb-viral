@@ -5,7 +5,7 @@ export const API = `${BACKEND_URL}/api`;
 
 export const api = axios.create({
     baseURL: API,
-    timeout: 30000,
+    timeout: 120000,
 });
 
 export const fmtNumber = (n) => {
