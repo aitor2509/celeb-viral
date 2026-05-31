@@ -34,6 +34,11 @@ EMERGENT_LLM_KEY = os.environ.get('EMERGENT_LLM_KEY')
 app = FastAPI(title="CelebTracker API")
 api_router = APIRouter(prefix="/api")
 
+MIN_RESULTS_PER_SECTION = 50
+RECENT_UPLOAD_SCAN_LIMIT = 500
+VIRAL_CHANNEL_SCAN_LIMIT = 500
+VIDEO_RESPONSE_LIMIT = 300
+
 
 # ===== Models =====
 class Celebrity(BaseModel):
@@ -162,7 +167,7 @@ async def fetch_channel_info(channel_id: str):
         return None
 
 
-async def fetch_latest_videos(channel_id: str, max_results: int = 100):
+async def fetch_latest_videos(channel_id: str, max_results: int = RECENT_UPLOAD_SCAN_LIMIT):
     """Fetch latest videos from a channel using the uploads playlist (paginated up to max_results)."""
     try:
         yt = yt_service()
@@ -224,7 +229,7 @@ async def fetch_latest_videos(channel_id: str, max_results: int = 100):
         return []
 
 
-def fetch_top_viewed_from_channel(channel_id: str, max_results: int = 200):
+def fetch_top_viewed_from_channel(channel_id: str, max_results: int = VIRAL_CHANNEL_SCAN_LIMIT):
     """Use search.list with order=viewCount to get the all-time top-viewed videos from a channel."""
     try:
         yt = yt_service()
@@ -505,7 +510,7 @@ async def refresh_celebrity_videos(celeb_id: str, channel_id: str = None, notify
     had_previous = len(existing_ids) > 0
     all_new = []
     for ch_id in channels_to_fetch:
-        videos = await fetch_latest_videos(ch_id, max_results=100)
+        videos = await fetch_latest_videos(ch_id, max_results=RECENT_UPLOAD_SCAN_LIMIT)
         # compute viral score per video using main channel subs
         channel_subs = celeb.get("subscriber_count", 1)
         for v in videos:
@@ -519,6 +524,17 @@ async def refresh_celebrity_videos(celeb_id: str, channel_id: str = None, notify
                 {"$set": doc},
                 upsert=True,
             )
+    await db.video_refresh_state.update_one(
+        {"_key": f"{celeb_id}:uploads"},
+        {"$set": {
+            "_key": f"{celeb_id}:uploads",
+            "celebrity_id": celeb_id,
+            "scan_limit": RECENT_UPLOAD_SCAN_LIMIT,
+            "channels": channels_to_fetch,
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
+        }},
+        upsert=True,
+    )
     if notify and had_previous:
         for v in all_new:
             label = "short" if v["is_short"] else "video"
@@ -546,18 +562,24 @@ async def get_celebrity_videos(celeb_id: str, kind: str = "video", sort: str = "
     if not celeb:
         raise HTTPException(status_code=404, detail="Celebrity not found")
     has_channels = celeb.get("youtube_channel_id") or celeb.get("secondary_channels")
+    is_short = kind == "short"
     if refresh and has_channels:
         await refresh_celebrity_videos(celeb_id)
         # Also reset viral cache so "Más virales" re-scans whole channel
         await db.viral_cache.delete_many({"celebrity_id": celeb_id})
-    # If no videos, fetch now
-    count = await db.videos.count_documents({"celebrity_id": celeb_id})
-    if count == 0 and has_channels:
+    # If the current kind has too few videos from older limited scans, do one deep scan.
+    count = await db.videos.count_documents({"celebrity_id": celeb_id, "is_short": is_short})
+    scan_state = await db.video_refresh_state.find_one({"_key": f"{celeb_id}:uploads"}, {"_id": 0})
+    should_deep_scan = (
+        has_channels and
+        count < MIN_RESULTS_PER_SECTION and
+        (not scan_state or scan_state.get("scan_limit", 0) < RECENT_UPLOAD_SCAN_LIMIT)
+    )
+    if should_deep_scan:
         await refresh_celebrity_videos(celeb_id, notify=False)
-    is_short = kind == "short"
     query = {"celebrity_id": celeb_id, "is_short": is_short}
     sort_key = "view_count" if sort == "viral" else "published_at"
-    videos = await db.videos.find(query, {"_id": 0}).sort(sort_key, -1).to_list(200)
+    videos = await db.videos.find(query, {"_id": 0}).sort(sort_key, -1).to_list(VIDEO_RESPONSE_LIMIT)
     return {"videos": videos}
 
 
@@ -892,6 +914,11 @@ async def get_viral_videos(celeb_id: str, kind: str = "video", refresh: bool = F
             # Refresh every 6 hours
             if (datetime.now(timezone.utc) - fetched).total_seconds() > 21600:
                 needs_refresh = True
+            if (
+                len(cache.get("videos", [])) < MIN_RESULTS_PER_SECTION and
+                cache.get("scan_limit", 0) < VIRAL_CHANNEL_SCAN_LIMIT
+            ):
+                needs_refresh = True
         except Exception:
             needs_refresh = True
     if needs_refresh:
@@ -903,7 +930,7 @@ async def get_viral_videos(celeb_id: str, kind: str = "video", refresh: bool = F
         all_top = []
         loop = asyncio.get_event_loop()
         for ch_id in channels:
-            vids = await loop.run_in_executor(None, lambda c=ch_id: fetch_top_viewed_from_channel(c, max_results=200))
+            vids = await loop.run_in_executor(None, lambda c=ch_id: fetch_top_viewed_from_channel(c, max_results=VIRAL_CHANNEL_SCAN_LIMIT))
             all_top.extend(vids)
         channel_subs = celeb.get("subscriber_count", 1)
         for v in all_top:
@@ -919,12 +946,14 @@ async def get_viral_videos(celeb_id: str, kind: str = "video", refresh: bool = F
                 continue
             seen.add(v["video_id"])
             filtered.append(v)
-        filtered = filtered[:200]
+        filtered = filtered[:VIDEO_RESPONSE_LIMIT]
         await db.viral_cache.update_one(
             {"_key": cache_key},
             {"$set": {
                 "_key": cache_key, "celebrity_id": celeb_id, "kind": kind,
-                "videos": filtered, "fetched_at": datetime.now(timezone.utc).isoformat(),
+                "videos": filtered,
+                "scan_limit": VIRAL_CHANNEL_SCAN_LIMIT,
+                "fetched_at": datetime.now(timezone.utc).isoformat(),
             }},
             upsert=True,
         )
@@ -938,6 +967,15 @@ async def get_video_clips(celeb_id: str, video_id: str):
     video = await db.videos.find_one(
         {"celebrity_id": celeb_id, "video_id": video_id}, {"_id": 0},
     )
+    if not video:
+        viral_caches = await db.viral_cache.find({"celebrity_id": celeb_id}, {"_id": 0}).to_list(10)
+        for cache in viral_caches:
+            for cached_video in cache.get("videos", []):
+                if cached_video.get("video_id") == video_id:
+                    video = cached_video
+                    break
+            if video:
+                break
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
     chapters = parse_chapters(video.get("description", ""), video.get("duration_seconds", 0))
