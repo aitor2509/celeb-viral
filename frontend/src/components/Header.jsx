@@ -37,9 +37,10 @@ const Header = ({ onAddCelebrity }) => {
         try {
             await api.post("/refresh-all");
             await loadNotifications();
-            toast.success("Contenido actualizado");
-        } catch {
-            toast.error("Error al actualizar");
+            toast.success("Actualización iniciada. Espera 1-2 minutos y vuelve a revisar.");
+        } catch (e) {
+            console.error(e);
+            toast.error("Error al iniciar actualización");
         } finally {
             setRefreshing(false);
         }
