@@ -100,7 +100,7 @@ const VideoSection = ({ celebrity, kind, onCelebrityUpdate }) => {
                                     IA · {label} recomendados para Facebook
                                 </h3>
                                 <p className="text-sm text-white/50 mt-1 leading-relaxed">
-                                    Claude Sonnet 4.5 analiza el contenido de {celebrity.name} y recomienda qué subir AHORA según tendencias.
+                                    Modelo híbrido: algoritmo propio de scoring + IA. El ranking lo decide el algoritmo (viral, tendencias, resurrección). Score máximo: 30 pts.
                                 </p>
                                 {celebrity.trending_context && (
                                     <div className="mt-3 p-3 rounded-lg bg-black/40 border border-white/5">
@@ -133,10 +133,26 @@ const VideoSection = ({ celebrity, kind, onCelebrityUpdate }) => {
                             </div>
                         </div>
 
+                        {recommendations?.trend_keywords_used?.length > 0 && (
+                            <div className="mt-3 p-3 rounded-lg bg-yellow-400/5 border border-yellow-400/20">
+                                <p className="text-[9px] uppercase tracking-widest text-yellow-400/60 font-bold mb-1">Keywords trending detectados por algoritmo</p>
+                                <div className="flex flex-wrap gap-1.5">
+                                    {recommendations.trend_keywords_used.map((kw, i) => (
+                                        <span key={i} className="text-[10px] px-2 py-0.5 rounded-full bg-yellow-400/10 text-yellow-300/80">{kw}</span>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
                         {recommendations?.strategy && (
-                            <div className="mt-4 p-4 rounded-lg celeb-border border bg-black/30">
+                            <div className="mt-3 p-4 rounded-lg celeb-border border bg-black/30">
                                 <p className="text-[10px] uppercase tracking-widest celeb-text font-bold mb-1.5">Estrategia general</p>
                                 <p className="text-sm text-white/80 leading-relaxed">{recommendations.strategy}</p>
+                            </div>
+                        )}
+                        {recommendations?.trending_patterns && (
+                            <div className="mt-3 p-4 rounded-lg bg-white/3 border border-white/8">
+                                <p className="text-[10px] uppercase tracking-widest text-white/40 font-bold mb-1.5">Patrones de redes sociales detectados</p>
+                                <p className="text-xs text-white/60 leading-relaxed">{recommendations.trending_patterns}</p>
                             </div>
                         )}
                     </div>
@@ -169,14 +185,28 @@ const VideoSection = ({ celebrity, kind, onCelebrityUpdate }) => {
                                     <div className="flex-1 min-w-0">
                                         <div className="flex items-center gap-2 mb-1">
                                             <span className="text-[10px] uppercase tracking-widest font-bold celeb-text">
-                                                Score {r.score}/100
+                                                Score {r.score}/30
                                             </span>
-                                            <div className="flex-1 h-1 rounded-full bg-white/10 overflow-hidden">
-                                                <div className="h-full celeb-bg" style={{ width: `${r.score}%` }} />
+                                            <div className="flex-1 h-1.5 rounded-full bg-white/10 overflow-hidden">
+                                                <div className="h-full celeb-bg" style={{ width: `${(r.score / 30) * 100}%` }} />
                                             </div>
                                         </div>
+                                        {r.score_breakdown && (
+                                            <div className="flex gap-2 mb-2 flex-wrap">
+                                                <span className="text-[9px] px-1.5 py-0.5 rounded bg-white/5 text-white/40">viral {r.score_breakdown.viral_base}</span>
+                                                <span className="text-[9px] px-1.5 py-0.5 rounded bg-white/5 text-white/40">trend {r.score_breakdown.trend_keyword}</span>
+                                                <span className="text-[9px] px-1.5 py-0.5 rounded bg-white/5 text-white/40">resurrec. {r.score_breakdown.resurrection}</span>
+                                                <span className="text-[9px] px-1.5 py-0.5 rounded bg-white/5 text-white/40">reciente {r.score_breakdown.recency_boost}</span>
+                                            </div>
+                                        )}
                                         <h4 className="font-semibold text-white text-sm line-clamp-2">{r.video.title}</h4>
                                         <p className="text-xs text-white/60 mt-1.5 line-clamp-3 leading-relaxed">{r.reason}</p>
+                                        {r.trend_match && r.trend_match !== "—" && (
+                                            <p className="text-[10px] text-yellow-400/70 mt-1">📡 {r.trend_match}</p>
+                                        )}
+                                        {r.prediction && (
+                                            <p className="text-[10px] text-green-400/70 mt-0.5">🔮 {r.prediction}</p>
+                                        )}
                                         <div className="flex items-center gap-3 mt-2 text-[11px] text-white/40">
                                             <span className="flex items-center gap-1"><Eye className="w-3 h-3" /> {fmtNumber(r.video.view_count)}</span>
                                             <span>{timeAgo(r.video.published_at)}</span>
