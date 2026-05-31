@@ -35,9 +35,9 @@ app = FastAPI(title="CelebTracker API")
 api_router = APIRouter(prefix="/api")
 
 MIN_RESULTS_PER_SECTION = 50
-RECENT_UPLOAD_SCAN_LIMIT = 500
-VIRAL_CHANNEL_SCAN_LIMIT = 500
-VIDEO_RESPONSE_LIMIT = 300
+RECENT_UPLOAD_SCAN_LIMIT = 250
+VIRAL_CHANNEL_SCAN_LIMIT = 200
+VIDEO_RESPONSE_LIMIT = 200
 
 
 # ===== Models =====
@@ -564,7 +564,7 @@ async def get_celebrity_videos(celeb_id: str, kind: str = "video", sort: str = "
     has_channels = celeb.get("youtube_channel_id") or celeb.get("secondary_channels")
     is_short = kind == "short"
     if refresh and has_channels:
-        await refresh_celebrity_videos(celeb_id)
+        asyncio.create_task(refresh_celebrity_videos(celeb_id))
         # Also reset viral cache so "Más virales" re-scans whole channel
         await db.viral_cache.delete_many({"celebrity_id": celeb_id})
     # If the current kind has too few videos from older limited scans, do one deep scan.
@@ -575,7 +575,7 @@ async def get_celebrity_videos(celeb_id: str, kind: str = "video", sort: str = "
         count < MIN_RESULTS_PER_SECTION and
         (not scan_state or scan_state.get("scan_limit", 0) < RECENT_UPLOAD_SCAN_LIMIT)
     )
-    if should_deep_scan:
+    if should_deep_scan and not refresh:
         await refresh_celebrity_videos(celeb_id, notify=False)
     query = {"celebrity_id": celeb_id, "is_short": is_short}
     sort_key = "view_count" if sort == "viral" else "published_at"
@@ -898,6 +898,56 @@ async def fetch_google_news(query: str, max_items: int = 20):
         return []
 
 
+async def refresh_viral_cache_for_celebrity(celeb: dict, kind: str = "video"):
+    celeb_id = celeb["id"]
+    is_short = kind == "short"
+    cache_key = f"{celeb_id}:{kind}"
+    channels = []
+    if celeb.get("youtube_channel_id"):
+        channels.append(celeb["youtube_channel_id"])
+    for sc in celeb.get("secondary_channels", []):
+        channels.append(sc["channel_id"])
+
+    all_top = []
+    loop = asyncio.get_event_loop()
+    for ch_id in channels:
+        vids = await loop.run_in_executor(
+            None,
+            lambda c=ch_id: fetch_top_viewed_from_channel(c, max_results=VIRAL_CHANNEL_SCAN_LIMIT),
+        )
+        all_top.extend(vids)
+
+    channel_subs = celeb.get("subscriber_count", 1)
+    for v in all_top:
+        v["celebrity_id"] = celeb_id
+        v["viral_score"] = compute_viral_score(v, channel_subs)
+
+    seen = set()
+    filtered = []
+    for v in sorted(all_top, key=lambda x: x.get("view_count", 0), reverse=True):
+        if v["video_id"] in seen:
+            continue
+        if v["is_short"] != is_short:
+            continue
+        seen.add(v["video_id"])
+        filtered.append(v)
+
+    filtered = filtered[:VIDEO_RESPONSE_LIMIT]
+    await db.viral_cache.update_one(
+        {"_key": cache_key},
+        {"$set": {
+            "_key": cache_key,
+            "celebrity_id": celeb_id,
+            "kind": kind,
+            "videos": filtered,
+            "scan_limit": VIRAL_CHANNEL_SCAN_LIMIT,
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
+        }},
+        upsert=True,
+    )
+    return filtered
+
+
 @api_router.get("/celebrities/{celeb_id}/viral-videos")
 async def get_viral_videos(celeb_id: str, kind: str = "video", refresh: bool = False):
     """All-time top viewed videos/shorts across the WHOLE channel(s) via YouTube search order=viewCount."""
@@ -922,42 +972,13 @@ async def get_viral_videos(celeb_id: str, kind: str = "video", refresh: bool = F
         except Exception:
             needs_refresh = True
     if needs_refresh:
-        channels = []
-        if celeb.get("youtube_channel_id"):
-            channels.append(celeb["youtube_channel_id"])
-        for sc in celeb.get("secondary_channels", []):
-            channels.append(sc["channel_id"])
-        all_top = []
-        loop = asyncio.get_event_loop()
-        for ch_id in channels:
-            vids = await loop.run_in_executor(None, lambda c=ch_id: fetch_top_viewed_from_channel(c, max_results=VIRAL_CHANNEL_SCAN_LIMIT))
-            all_top.extend(vids)
-        channel_subs = celeb.get("subscriber_count", 1)
-        for v in all_top:
-            v["celebrity_id"] = celeb_id
-            v["viral_score"] = compute_viral_score(v, channel_subs)
-        # filter by kind, sort by views, dedupe
-        seen = set()
-        filtered = []
-        for v in sorted(all_top, key=lambda x: x.get("view_count", 0), reverse=True):
-            if v["video_id"] in seen:
-                continue
-            if v["is_short"] != is_short:
-                continue
-            seen.add(v["video_id"])
-            filtered.append(v)
-        filtered = filtered[:VIDEO_RESPONSE_LIMIT]
-        await db.viral_cache.update_one(
-            {"_key": cache_key},
-            {"$set": {
-                "_key": cache_key, "celebrity_id": celeb_id, "kind": kind,
-                "videos": filtered,
-                "scan_limit": VIRAL_CHANNEL_SCAN_LIMIT,
-                "fetched_at": datetime.now(timezone.utc).isoformat(),
-            }},
-            upsert=True,
-        )
-        return {"videos": filtered}
+        asyncio.create_task(refresh_viral_cache_for_celebrity(celeb, kind))
+        fallback = cache.get("videos", []) if cache else []
+        if not fallback:
+            fallback = await db.videos.find(
+                {"celebrity_id": celeb_id, "is_short": is_short}, {"_id": 0}
+            ).sort("view_count", -1).to_list(VIDEO_RESPONSE_LIMIT)
+        return {"videos": fallback, "refreshing": True}
     return {"videos": cache.get("videos", [])}
 
 
@@ -1079,6 +1100,20 @@ async def list_contacts(celeb_id: str):
 # ===== Routes: Refresh all =====
 @api_router.post("/refresh-all")
 async def refresh_all():
+    celebs = await db.celebrities.find({}, {"_id": 0}).to_list(200)
+    async def _refresh_in_background(items):
+        for c in items:
+            if c.get("youtube_channel_id") or c.get("secondary_channels"):
+                await refresh_celebrity_videos(c["id"], notify=True)
+                # Also reset viral cache so next load re-scans the whole channel
+                await db.viral_cache.delete_many({"celebrity_id": c["id"]})
+
+    asyncio.create_task(_refresh_in_background(celebs))
+    return {"ok": True, "started": True, "queued": len(celebs)}
+
+
+@api_router.post("/refresh-all-sync")
+async def refresh_all_sync():
     celebs = await db.celebrities.find({}, {"_id": 0}).to_list(200)
     for c in celebs:
         if c.get("youtube_channel_id") or c.get("secondary_channels"):
