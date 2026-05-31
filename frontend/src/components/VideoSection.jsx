@@ -9,9 +9,10 @@ import {
     Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription,
 } from "@/components/ui/dialog";
 
-const VideoSection = ({ celebrity, kind, onCelebrityUpdate }) => {
+const VideoSection = ({ celebrity, kind, refreshSignal = 0, onCelebrityUpdate }) => {
     const [recent, setRecent] = useState([]);
     const [viral, setViral] = useState([]);
+    const [loading, setLoading] = useState(true);
     const [recommendations, setRecommendations] = useState(null);
     const [recoLoading, setRecoLoading] = useState(false);
     const [contextOpen, setContextOpen] = useState(false);
@@ -34,15 +35,23 @@ const VideoSection = ({ celebrity, kind, onCelebrityUpdate }) => {
     };
 
     const load = useCallback(async () => {
-        const [r, v] = await Promise.all([
-            api.get(`/celebrities/${celebrity.id}/videos`, { params: { kind, sort: "recent" } }),
-            api.get(`/celebrities/${celebrity.id}/viral-videos`, { params: { kind } }),
-        ]);
-        setRecent(r.data.videos);
-        setViral(v.data.videos);
+        setLoading(true);
+        try {
+            const [r, v] = await Promise.all([
+                api.get(`/celebrities/${celebrity.id}/videos`, { params: { kind, sort: "recent" } }),
+                api.get(`/celebrities/${celebrity.id}/viral-videos`, { params: { kind } }),
+            ]);
+            setRecent(r.data.videos);
+            setViral(v.data.videos);
+        } catch (e) {
+            toast.error("Error al cargar videos");
+            console.error(e);
+        } finally {
+            setLoading(false);
+        }
     }, [celebrity.id, kind]);
 
-    useEffect(() => { load(); }, [load]);
+    useEffect(() => { load(); }, [load, refreshSignal]);
 
     const fetchRecommendations = async () => {
         setRecoLoading(true);
@@ -84,11 +93,11 @@ const VideoSection = ({ celebrity, kind, onCelebrityUpdate }) => {
                 </TabsList>
 
                 <TabsContent value="recent" className="mt-5">
-                    <Grid videos={recent} kind={kind} onShowClips={handleShowClips} />
+                    <Grid videos={recent} kind={kind} loading={loading} label="Más recientes" onShowClips={handleShowClips} />
                 </TabsContent>
 
                 <TabsContent value="viral" className="mt-5">
-                    <Grid videos={viral} kind={kind} onShowClips={handleShowClips} />
+                    <Grid videos={viral} kind={kind} loading={loading} label="Más virales del canal" onShowClips={handleShowClips} />
                 </TabsContent>
 
                 <TabsContent value="reco" className="mt-5">
@@ -304,10 +313,17 @@ const VideoSection = ({ celebrity, kind, onCelebrityUpdate }) => {
     );
 };
 
-const Grid = ({ videos, kind, onShowClips }) => {
+const Grid = ({ videos, kind, loading, label, onShowClips }) => {
+    if (loading) {
+        return (
+            <div data-testid={`${kind}-${label === "Más recientes" ? "recent" : "viral"}-loading`} className="p-12 text-center text-white/40 border border-dashed border-white/10 rounded-xl">
+                Cargando más videos del canal...
+            </div>
+        );
+    }
     if (!videos || videos.length === 0) {
         return (
-            <div className="p-12 text-center text-white/30 border border-dashed border-white/10 rounded-xl">
+            <div data-testid={`${kind}-${label === "Más recientes" ? "recent" : "viral"}-empty`} className="p-12 text-center text-white/30 border border-dashed border-white/10 rounded-xl">
                 Sin {kind === "short" ? "shorts" : "videos"}. Pulsa "Actualizar" arriba para sincronizar.
             </div>
         );
@@ -317,10 +333,18 @@ const Grid = ({ videos, kind, onShowClips }) => {
         ? "grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3"
         : "grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4";
     const scoreColor = (s) => s >= 75 ? "#FF3B30" : s >= 55 ? "#FACC15" : s >= 35 ? "#06B6D4" : "#71717A";
+    const sectionKey = label === "Más recientes" ? "recent" : "viral";
     return (
-        <div className={gridCls}>
-            {videos.map((v) => (
-                <div key={v.video_id} data-testid={`${kind}-video-${v.video_id}`} className="group rounded-xl bg-[#111113] border border-white/10 hover:border-white/20 overflow-hidden transition-all">
+        <div>
+            <div className="flex items-center justify-between gap-3 mb-3 text-xs text-white/45">
+                <span data-testid={`${kind}-${sectionKey}-count`} className="font-bold uppercase tracking-widest">
+                    {videos.length} {kind === "short" ? "shorts" : "videos"} cargados
+                </span>
+                <span data-testid={`${kind}-${sectionKey}-hint`}>Se muestran los disponibles sin limitar por fecha.</span>
+            </div>
+            <div className={gridCls}>
+                {videos.map((v) => (
+                    <div key={v.video_id} data-testid={`${kind}-${sectionKey}-video-${v.video_id}`} className="group rounded-xl bg-[#111113] border border-white/10 hover:border-white/20 overflow-hidden transition-all">
                     <a href={v.url} target="_blank" rel="noreferrer" className="block">
                         <div className={`relative ${isShort ? "aspect-[9/16]" : "aspect-video"} overflow-hidden bg-black`}>
                             <img src={v.thumbnail_url} alt={v.title} className="w-full h-full object-cover group-hover:scale-105 transition duration-500" />
@@ -375,8 +399,9 @@ const Grid = ({ videos, kind, onShowClips }) => {
                             <Scissors className="w-3 h-3" /> Detectar clips virales
                         </button>
                     )}
-                </div>
-            ))}
+                    </div>
+                ))}
+            </div>
         </div>
     );
 };
