@@ -24,6 +24,7 @@ const CelebrityDetail = () => {
     const [virals, setVirals] = useState([]);
     const [loading, setLoading] = useState(true);
     const [refreshing, setRefreshing] = useState(false);
+    const [videoRefreshSignal, setVideoRefreshSignal] = useState(0);
     const [viralOpen, setViralOpen] = useState(false);
     const [contactOpen, setContactOpen] = useState(false);
 
@@ -50,6 +51,7 @@ const CelebrityDetail = () => {
         try {
             await api.get(`/celebrities/${id}/videos`, { params: { refresh: true } });
             await loadCeleb();
+            setVideoRefreshSignal((current) => current + 1);
             toast.success("Videos actualizados");
         } catch {
             toast.error("Error al actualizar");
@@ -151,11 +153,11 @@ const CelebrityDetail = () => {
                 </TabsList>
 
                 <TabsContent value="videos" className="mt-6">
-                    <VideoSection key={`${celeb.id}-video`} celebrity={celeb} kind="video" onCelebrityUpdate={loadCeleb} />
+                    <VideoSection key={`${celeb.id}-video`} celebrity={celeb} kind="video" refreshSignal={videoRefreshSignal} onCelebrityUpdate={loadCeleb} />
                 </TabsContent>
 
                 <TabsContent value="shorts" className="mt-6">
-                    <VideoSection key={`${celeb.id}-short`} celebrity={celeb} kind="short" onCelebrityUpdate={loadCeleb} />
+                    <VideoSection key={`${celeb.id}-short`} celebrity={celeb} kind="short" refreshSignal={videoRefreshSignal} onCelebrityUpdate={loadCeleb} />
                 </TabsContent>
 
                 <TabsContent value="news" className="mt-6">
