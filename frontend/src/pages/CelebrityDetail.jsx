@@ -52,9 +52,12 @@ const CelebrityDetail = () => {
             await api.get(`/celebrities/${id}/videos`, { params: { refresh: true } });
             await loadCeleb();
             setVideoRefreshSignal((current) => current + 1);
-            toast.success("Videos actualizados");
-        } catch {
-            toast.error("Error al actualizar");
+            setTimeout(() => setVideoRefreshSignal((current) => current + 1), 15000);
+            setTimeout(() => setVideoRefreshSignal((current) => current + 1), 45000);
+            toast.success("Actualización iniciada. Espera 1-2 minutos y revisa de nuevo.");
+        } catch (e) {
+            console.error(e);
+            toast.error("Error al iniciar actualización");
         } finally {
             setRefreshing(false);
         }
