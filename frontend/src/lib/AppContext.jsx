@@ -29,14 +29,34 @@ export const AppProvider = ({ children }) => {
         }
     }, []);
 
+    const silentRefreshAll = useCallback(async () => {
+        try {
+            await api.post("/refresh-all");
+        } catch (e) {
+            // silent - no toast, no UI block
+            console.debug("Background refresh-all failed", e);
+        }
+    }, []);
+
     useEffect(() => {
         (async () => {
             await Promise.all([loadCelebrities(), loadNotifications()]);
             setLoading(false);
         })();
-        const interval = setInterval(loadNotifications, 60000);
-        return () => clearInterval(interval);
-    }, [loadCelebrities, loadNotifications]);
+
+        // Poll notifications every 20s (was 60s)
+        const notifInterval = setInterval(loadNotifications, 20000);
+        // Detect new celebrities/accounts every 30s
+        const celebInterval = setInterval(loadCelebrities, 30000);
+        // Silent backend refresh every 5 minutes
+        const refreshInterval = setInterval(silentRefreshAll, 5 * 60 * 1000);
+
+        return () => {
+            clearInterval(notifInterval);
+            clearInterval(celebInterval);
+            clearInterval(refreshInterval);
+        };
+    }, [loadCelebrities, loadNotifications, silentRefreshAll]);
 
     useEffect(() => {
         document.documentElement.style.setProperty("--celebrity-color", selectedColor);
