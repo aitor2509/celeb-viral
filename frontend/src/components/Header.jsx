@@ -1,9 +1,8 @@
 import React, { useState, useRef, useEffect } from "react";
-import { Search, Bell, RefreshCw, Command } from "lucide-react";
+import { Search, Bell, Command } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { useApp } from "@/lib/AppContext";
-import { api, timeAgo } from "@/lib/api";
-import { toast } from "sonner";
+import { timeAgo } from "@/lib/api";
 import {
     Popover,
     PopoverContent,
@@ -11,9 +10,8 @@ import {
 } from "@/components/ui/popover";
 
 const Header = ({ onAddCelebrity }) => {
-    const { celebrities, notifications, unread, markAllRead, markRead, loadNotifications } = useApp();
+    const { celebrities, notifications, unread, markAllRead, markRead } = useApp();
     const [query, setQuery] = useState("");
-    const [refreshing, setRefreshing] = useState(false);
     const navigate = useNavigate();
     const inputRef = useRef(null);
 
@@ -31,20 +29,6 @@ const Header = ({ onAddCelebrity }) => {
     const filtered = query
         ? celebrities.filter((c) => c.name.toLowerCase().includes(query.toLowerCase()))
         : [];
-
-    const handleRefreshAll = async () => {
-        setRefreshing(true);
-        try {
-            await api.post("/refresh-all");
-            await loadNotifications();
-            toast.success("Actualización iniciada. Espera 1-2 minutos y vuelve a revisar.");
-        } catch (e) {
-            console.error(e);
-            toast.error("Error al iniciar actualización");
-        } finally {
-            setRefreshing(false);
-        }
-    };
 
     const handleNotifClick = async (n) => {
         await markRead(n.id);
@@ -96,16 +80,15 @@ const Header = ({ onAddCelebrity }) => {
                     )}
                 </div>
 
-                <div className="flex items-center gap-2">
-                    <button
-                        onClick={handleRefreshAll}
-                        disabled={refreshing}
-                        data-testid="refresh-all-btn"
-                        className="h-9 px-3 rounded-lg bg-[#111113] hover:bg-[#1a1a1d] border border-white/10 text-white/70 hover:text-white text-sm font-medium transition flex items-center gap-2 disabled:opacity-50"
+                <div className="flex items-center gap-3">
+                    {/* Live status indicator (replaces manual refresh button) */}
+                    <div
+                        data-testid="live-status-indicator"
+                        className="flex items-center gap-1.5 text-[11px] text-white/40 font-medium"
                     >
-                        <RefreshCw className={`w-3.5 h-3.5 ${refreshing ? "animate-spin" : ""}`} strokeWidth={2} />
-                        <span className="hidden sm:inline">Actualizar</span>
-                    </button>
+                        <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse inline-block" />
+                        En vivo
+                    </div>
 
                     <Popover>
                         <PopoverTrigger asChild>
@@ -142,36 +125,45 @@ const Header = ({ onAddCelebrity }) => {
                                 {notifications.length === 0 && (
                                     <div className="p-6 text-center text-white/40 text-sm">Sin notificaciones</div>
                                 )}
-                                {notifications.map((n) => (
-                                    <button
-                                        key={n.id}
-                                        data-testid={`notif-item-${n.id}`}
-                                        onClick={() => handleNotifClick(n)}
-                                        className={`w-full text-left flex gap-3 p-3 border-b border-white/5 hover:bg-white/5 transition ${
-                                            !n.read ? "bg-white/[0.02]" : ""
-                                        }`}
-                                    >
-                                        {n.image_url ? (
-                                            <img src={n.image_url} alt="" className="w-12 h-12 rounded object-cover shrink-0" />
-                                        ) : (
-                                            <div className="w-12 h-12 rounded shrink-0" style={{ background: n.celebrity_color }} />
-                                        )}
-                                        <div className="flex-1 min-w-0">
-                                            <div className="flex items-center gap-2">
-                                                <span
-                                                    className="text-[10px] uppercase tracking-wider font-bold"
-                                                    style={{ color: n.celebrity_color }}
-                                                >
-                                                    {n.type === "new_video" ? "Nuevo video" : n.type}
-                                                </span>
-                                                {!n.read && <span className="w-1.5 h-1.5 rounded-full bg-red-500 pulse-dot" />}
+                                {notifications.map((n) => {
+                                    const isBomb = n.type === "video_bomb";
+                                    const labelColor = isBomb ? "#FF3B30" : n.celebrity_color;
+                                    const label = isBomb
+                                        ? "💣 VIDEO BOMBA"
+                                        : n.type === "new_video"
+                                            ? "Nuevo video"
+                                            : n.type;
+                                    return (
+                                        <button
+                                            key={n.id}
+                                            data-testid={`notif-item-${n.id}`}
+                                            onClick={() => handleNotifClick(n)}
+                                            className={`w-full text-left flex gap-3 p-3 border-b border-white/5 hover:bg-white/5 transition ${
+                                                !n.read ? "bg-white/[0.02]" : ""
+                                            }`}
+                                        >
+                                            {n.image_url ? (
+                                                <img src={n.image_url} alt="" className="w-12 h-12 rounded object-cover shrink-0" />
+                                            ) : (
+                                                <div className="w-12 h-12 rounded shrink-0" style={{ background: n.celebrity_color }} />
+                                            )}
+                                            <div className="flex-1 min-w-0">
+                                                <div className="flex items-center gap-2">
+                                                    <span
+                                                        className="text-[10px] uppercase tracking-wider font-bold"
+                                                        style={{ color: labelColor }}
+                                                    >
+                                                        {label}
+                                                    </span>
+                                                    {!n.read && <span className="w-1.5 h-1.5 rounded-full bg-red-500 pulse-dot" />}
+                                                </div>
+                                                <p className="text-sm font-semibold text-white truncate mt-0.5">{n.title}</p>
+                                                <p className="text-xs text-white/50 line-clamp-2 mt-0.5">{n.message}</p>
+                                                <p className="text-[10px] text-white/30 mt-1">{timeAgo(n.created_at)}</p>
                                             </div>
-                                            <p className="text-sm font-semibold text-white truncate mt-0.5">{n.title}</p>
-                                            <p className="text-xs text-white/50 line-clamp-2 mt-0.5">{n.message}</p>
-                                            <p className="text-[10px] text-white/30 mt-1">{timeAgo(n.created_at)}</p>
-                                        </div>
-                                    </button>
-                                ))}
+                                        </button>
+                                    );
+                                })}
                             </div>
                         </PopoverContent>
                     </Popover>
