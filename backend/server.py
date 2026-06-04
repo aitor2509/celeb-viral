@@ -38,6 +38,19 @@ MIN_RESULTS_PER_SECTION = 50
 RECENT_UPLOAD_SCAN_LIMIT = 250
 VIRAL_CHANNEL_SCAN_LIMIT = 200
 VIDEO_RESPONSE_LIMIT = 200
+VIDEO_BOMB_VIEWS_THRESHOLD = 50000  # ajustable según el canal
+
+
+def is_video_bomb(video: dict) -> bool:
+    """Detect 'video bomba': high view-count video published in the last 48h."""
+    try:
+        views = int(video.get("view_count", 0))
+        pub = video.get("published_at", "")
+        pub_dt = datetime.fromisoformat(pub.replace("Z", "+00:00"))
+        hours_old = (datetime.now(timezone.utc) - pub_dt).total_seconds() / 3600
+        return views >= VIDEO_BOMB_VIEWS_THRESHOLD and hours_old <= 48
+    except Exception:
+        return False
 
 
 # ===== Models =====
@@ -538,15 +551,27 @@ async def refresh_celebrity_videos(celeb_id: str, channel_id: str = None, notify
     if notify and had_previous:
         for v in all_new:
             label = "short" if v["is_short"] else "video"
+            is_bomb = is_video_bomb(v)
+            if is_bomb:
+                try:
+                    views_k = int(v.get("view_count", 0) / 1000)
+                except Exception:
+                    views_k = 0
+                notif_type = "video_bomb"
+                notif_title = f"💣 {celeb['name']} BOMBA: {views_k}K views"
+            else:
+                notif_type = "new_video"
+                notif_title = f"{celeb['name']} subió un nuevo {label}"
             notif = Notification(
                 celebrity_id=celeb_id,
                 celebrity_name=celeb["name"],
                 celebrity_color=celeb["color"],
-                type="new_video",
-                title=f"{celeb['name']} subió un nuevo {label}",
+                type=notif_type,
+                title=notif_title,
                 message=v["title"],
                 link=v["url"],
                 image_url=v["thumbnail_url"],
+                created_at=v["published_at"],
             )
             await db.notifications.insert_one(notif.model_dump())
     return all_new
@@ -579,8 +604,15 @@ async def get_celebrity_videos(celeb_id: str, kind: str = "video", sort: str = "
         await refresh_celebrity_videos(celeb_id, notify=False)
     query = {"celebrity_id": celeb_id, "is_short": is_short}
     sort_key = "view_count" if sort == "viral" else "published_at"
-    videos = await db.videos.find(query, {"_id": 0}).sort(sort_key, -1).to_list(VIDEO_RESPONSE_LIMIT)
-    return {"videos": videos}
+    raw = await db.videos.find(query, {"_id": 0}).sort(sort_key, -1).to_list(VIDEO_RESPONSE_LIMIT * 2)
+    seen = set()
+    videos = []
+    for v in raw:
+        vid = v.get("video_id")
+        if vid and vid not in seen:
+            seen.add(vid)
+            videos.append(v)
+    return {"videos": videos[:VIDEO_RESPONSE_LIMIT]}
 
 
 @api_router.post("/celebrities/{celeb_id}/secondary-channels")
@@ -692,6 +724,62 @@ def _potential_score(video: dict, channel_subs: int) -> float:
     return (v_score * 0.5 + e_score * 0.3 + r_score * 0.2)
 
 
+async def expand_keywords_with_ai(keywords: list, celebrity_name: str) -> list:
+    """
+    Usa LLaMA via Groq para expandir keywords con sinónimos, variantes y términos
+    relacionados en contexto de medios y entretenimiento LATAM. Si falla, devuelve
+    keywords originales.
+    """
+    if not keywords:
+        return []
+    api_key = os.environ.get("GROQ_API_KEY")
+    if not api_key:
+        return keywords
+
+    try:
+        groq_client = Groq(api_key=api_key)
+        keywords_str = ", ".join(keywords)
+        prompt = (
+            f"Contexto: canal de YouTube de {celebrity_name} en México/LATAM.\n"
+            f"Keywords del usuario: {keywords_str}\n\n"
+            f"Tarea: Para cada keyword genera 5-8 sinónimos, variantes, términos relacionados "
+            f"y palabras que frecuentemente aparecen en títulos de YouTube sobre ese tema en español LATAM. "
+            f"Incluye variantes con/sin acento, abreviaciones, nombres propios relevantes.\n\n"
+            f"Responde SOLO con JSON válido, sin markdown:\n"
+            f'[["keyword_original", "sinonimo1", "sinonimo2"], ...]'
+        )
+        msg = groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            max_tokens=500,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        raw = msg.choices[0].message.content.strip()
+        raw = re.sub(r"```json|```", "", raw).strip()
+        # Try to find the JSON array in case the model wraps it
+        match = re.search(r"\[.*\]", raw, re.DOTALL)
+        if match:
+            raw = match.group(0)
+        expanded_groups = json.loads(raw)
+        all_terms = list(keywords)
+        for group in expanded_groups:
+            if isinstance(group, list):
+                for t in group:
+                    if isinstance(t, str) and len(t.strip()) >= 2:
+                        all_terms.append(t.lower().strip())
+        # Deduplicate preserving order
+        seen = set()
+        deduped = []
+        for t in all_terms:
+            tl = t.lower().strip()
+            if tl and tl not in seen:
+                seen.add(tl)
+                deduped.append(tl)
+        return deduped
+    except Exception as e:
+        logging.warning(f"Keyword expansion failed, using originals: {e}")
+        return keywords
+
+
 @api_router.post("/celebrities/{celeb_id}/recommendations")
 async def get_hybrid_recommendations(celeb_id: str, kind: str = "video"):
     """
@@ -706,7 +794,11 @@ async def get_hybrid_recommendations(celeb_id: str, kind: str = "video"):
 
     is_short = kind == "short"
     trending_context = celeb.get("trending_context", "").strip()
-    trend_keywords = _extract_trend_keywords(trending_context)
+    trend_keywords_raw = _extract_trend_keywords(trending_context)
+    if trend_keywords_raw and os.environ.get("GROQ_API_KEY"):
+        trend_keywords = await expand_keywords_with_ai(trend_keywords_raw, celeb["name"])
+    else:
+        trend_keywords = trend_keywords_raw
     channel_subs = celeb.get("subscriber_count", 1)
 
     # --- Obtener todos los videos disponibles ---
@@ -832,9 +924,10 @@ async def get_hybrid_recommendations(celeb_id: str, kind: str = "video"):
     return {
         "recommendations": recommendations,
         "strategy": overall_strategy,
-        "trend_keywords_used": trend_keywords,
+        "trend_keywords_used": trend_keywords_raw,
+        "trend_keywords_expanded": trend_keywords[:20],
         "counts": {"recent": len(cat_a), "viral": len(cat_b), "trend": len(cat_c)},
-        "model": "hybrid_v2",
+        "model": "hybrid_v3_semantic",
     }
 
 
@@ -975,9 +1068,17 @@ async def get_viral_videos(celeb_id: str, kind: str = "video", refresh: bool = F
         asyncio.create_task(refresh_viral_cache_for_celebrity(celeb, kind))
         fallback = cache.get("videos", []) if cache else []
         if not fallback:
-            fallback = await db.videos.find(
+            raw = await db.videos.find(
                 {"celebrity_id": celeb_id, "is_short": is_short}, {"_id": 0}
-            ).sort("view_count", -1).to_list(VIDEO_RESPONSE_LIMIT)
+            ).sort("view_count", -1).to_list(VIDEO_RESPONSE_LIMIT * 2)
+            seen = set()
+            fallback = []
+            for v in raw:
+                vid = v.get("video_id")
+                if vid and vid not in seen:
+                    seen.add(vid)
+                    fallback.append(v)
+            fallback = fallback[:VIDEO_RESPONSE_LIMIT]
         return {"videos": fallback, "refreshing": True}
     return {"videos": cache.get("videos", [])}
 
