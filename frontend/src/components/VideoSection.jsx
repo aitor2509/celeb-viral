@@ -9,7 +9,27 @@ import {
     Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription,
 } from "@/components/ui/dialog";
 
-const VideoSection = ({ celebrity, kind, refreshSignal = 0, onCelebrityUpdate }) => {
+// ---- Module-level helpers (not recreated per render) ----
+const TIMESTAMP_RE = /(?:^|\s)(\d{1,2}:\d{2}(?::\d{2})?)\s*[-–—:]?\s*([^\n]{3,80})/gm;
+const countChapters = (description) => {
+    if (!description) return 0;
+    // Reset lastIndex because regex has /g flag
+    TIMESTAMP_RE.lastIndex = 0;
+    const matches = description.match(TIMESTAMP_RE);
+    return matches ? matches.length : 0;
+};
+
+const dedup = (arr) => {
+    const seen = new Set();
+    return (arr || []).filter((v) => {
+        if (!v || !v.video_id) return false;
+        if (seen.has(v.video_id)) return false;
+        seen.add(v.video_id);
+        return true;
+    });
+};
+
+const VideoSection = ({ celebrity, kind, onCelebrityUpdate }) => {
     const [recent, setRecent] = useState([]);
     const [viral, setViral] = useState([]);
     const [loading, setLoading] = useState(true);
@@ -34,24 +54,32 @@ const VideoSection = ({ celebrity, kind, refreshSignal = 0, onCelebrityUpdate })
         }
     };
 
-    const load = useCallback(async () => {
-        setLoading(true);
+    const load = useCallback(async (silent = false) => {
+        if (!silent) setLoading(true);
         try {
             const [r, v] = await Promise.all([
                 api.get(`/celebrities/${celebrity.id}/videos`, { params: { kind, sort: "recent" } }),
                 api.get(`/celebrities/${celebrity.id}/viral-videos`, { params: { kind } }),
             ]);
-            setRecent(r.data.videos);
-            setViral(v.data.videos);
+            setRecent(dedup(r.data.videos));
+            setViral(dedup(v.data.videos));
         } catch (e) {
-            toast.error("Error al cargar videos");
+            if (!silent) toast.error("Error al cargar videos");
             console.error(e);
         } finally {
-            setLoading(false);
+            if (!silent) setLoading(false);
         }
     }, [celebrity.id, kind]);
 
-    useEffect(() => { load(); }, [load, refreshSignal]);
+    useEffect(() => { load(); }, [load]);
+
+    // Auto-refresh video list every 90 seconds (silent, no toasts)
+    useEffect(() => {
+        const interval = setInterval(() => {
+            load(true);
+        }, 90000);
+        return () => clearInterval(interval);
+    }, [load]);
 
     const fetchRecommendations = async () => {
         setRecoLoading(true);
@@ -93,11 +121,11 @@ const VideoSection = ({ celebrity, kind, refreshSignal = 0, onCelebrityUpdate })
                 </TabsList>
 
                 <TabsContent value="recent" className="mt-5">
-                    <Grid videos={recent} kind={kind} loading={loading} label="Más recientes" onShowClips={handleShowClips} />
+                    <Grid videos={recent} kind={kind} loading={loading} label="Más recientes" onShowClips={handleShowClips} celebrity={celebrity} />
                 </TabsContent>
 
                 <TabsContent value="viral" className="mt-5">
-                    <Grid videos={viral} kind={kind} loading={loading} label="Más virales del canal" onShowClips={handleShowClips} />
+                    <Grid videos={viral} kind={kind} loading={loading} label="Más virales del canal" onShowClips={handleShowClips} celebrity={celebrity} />
                 </TabsContent>
 
                 <TabsContent value="reco" className="mt-5">
@@ -152,6 +180,17 @@ const VideoSection = ({ celebrity, kind, refreshSignal = 0, onCelebrityUpdate })
                                 </div>
                             </div>
                         )}
+                        {recommendations?.trend_keywords_expanded?.length > 0 && (
+                            <div className="mt-2 p-2 rounded bg-white/3 border border-white/5">
+                                <p className="text-[9px] uppercase tracking-widest text-white/30 font-bold mb-1">
+                                    Términos buscados por IA ({recommendations.trend_keywords_expanded.length})
+                                </p>
+                                <p className="text-[10px] text-white/30 leading-relaxed">
+                                    {recommendations.trend_keywords_expanded.slice(0, 15).join(" · ")}
+                                    {recommendations.trend_keywords_expanded.length > 15 && " · ..."}
+                                </p>
+                            </div>
+                        )}
                         {recommendations?.strategy && (
                             <div className="mt-3 p-4 rounded-lg celeb-border border bg-black/30">
                                 <p className="text-[10px] uppercase tracking-widest celeb-text font-bold mb-1.5">Estrategia general</p>
@@ -184,13 +223,13 @@ const VideoSection = ({ celebrity, kind, refreshSignal = 0, onCelebrityUpdate })
                                 {cats.map(catKey => {
                                     const items = grouped[catKey];
                                     if (!items || items.length === 0) return null;
-                                    const label = items[0].category_label;
+                                    const catLabel = items[0].category_label;
                                     const color = catColors[catKey];
                                     return (
                                         <div key={catKey}>
                                             <div className="flex items-center gap-2 mb-3">
                                                 <div className="w-3 h-3 rounded-full" style={{ background: color }} />
-                                                <h3 className="font-bold text-sm text-white">{label}</h3>
+                                                <h3 className="font-bold text-sm text-white">{catLabel}</h3>
                                                 <span className="text-[10px] text-white/30">{items.length} videos</span>
                                             </div>
                                             <div className="space-y-2">
@@ -270,11 +309,25 @@ const VideoSection = ({ celebrity, kind, refreshSignal = 0, onCelebrityUpdate })
                                         {c.clip_score}
                                     </div>
                                     <div className="flex-1 min-w-0">
-                                        <div className="flex items-center gap-2 text-[11px] text-white/40 font-mono">
-                                            <span>{c.ts}</span><span>→</span><span>{c.end_ts}</span>
-                                            <span className="text-white/30">({c.duration}s)</span>
+                                        <div className="flex items-center gap-2 mb-0.5">
+                                            <span className="font-mono text-sm font-bold text-white bg-white/10 px-2 py-0.5 rounded">{c.ts}</span>
+                                            <span className="text-white/40 text-xs">→</span>
+                                            <span className="font-mono text-sm font-bold text-white bg-white/10 px-2 py-0.5 rounded">{c.end_ts}</span>
+                                            <span className="text-white/30 text-[10px]">({c.duration}s)</span>
+                                            <button
+                                                onClick={(e) => {
+                                                    e.preventDefault();
+                                                    e.stopPropagation();
+                                                    navigator.clipboard.writeText(`${c.ts} - ${c.end_ts}`);
+                                                    toast.success("Timestamps copiados");
+                                                }}
+                                                className="ml-1 text-white/30 hover:text-white text-xs px-1.5 py-0.5 rounded bg-white/5 hover:bg-white/10 transition"
+                                                title="Copiar rango"
+                                            >
+                                                📋
+                                            </button>
                                         </div>
-                                        <p className="text-sm font-medium text-white truncate mt-0.5">{c.topic}</p>
+                                        <p className="text-sm font-medium text-white truncate">{c.topic}</p>
                                     </div>
                                     <ExternalLink className="w-3.5 h-3.5 text-white/40 shrink-0" />
                                 </a>
@@ -313,7 +366,7 @@ const VideoSection = ({ celebrity, kind, refreshSignal = 0, onCelebrityUpdate })
     );
 };
 
-const Grid = ({ videos, kind, loading, label, onShowClips }) => {
+const Grid = ({ videos, kind, loading, label, onShowClips, celebrity }) => {
     if (loading) {
         return (
             <div data-testid={`${kind}-${label === "Más recientes" ? "recent" : "viral"}-loading`} className="p-12 text-center text-white/40 border border-dashed border-white/10 rounded-xl">
@@ -324,7 +377,7 @@ const Grid = ({ videos, kind, loading, label, onShowClips }) => {
     if (!videos || videos.length === 0) {
         return (
             <div data-testid={`${kind}-${label === "Más recientes" ? "recent" : "viral"}-empty`} className="p-12 text-center text-white/30 border border-dashed border-white/10 rounded-xl">
-                Sin {kind === "short" ? "shorts" : "videos"}. Pulsa "Actualizar" arriba para sincronizar.
+                Sin {kind === "short" ? "shorts" : "videos"}. Los datos se actualizan automáticamente.
             </div>
         );
     }
@@ -334,73 +387,112 @@ const Grid = ({ videos, kind, loading, label, onShowClips }) => {
         : "grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4";
     const scoreColor = (s) => s >= 75 ? "#FF3B30" : s >= 55 ? "#FACC15" : s >= 35 ? "#06B6D4" : "#71717A";
     const sectionKey = label === "Más recientes" ? "recent" : "viral";
+    const hasMultipleChannels = (celebrity?.secondary_channels?.length || 0) > 0;
+    const maxViews = Math.max(...videos.map((v) => v.view_count || 0), 1);
+
     return (
         <div>
             <div className="flex items-center justify-between gap-3 mb-3 text-xs text-white/45">
                 <span data-testid={`${kind}-${sectionKey}-count`} className="font-bold uppercase tracking-widest">
                     {videos.length} {kind === "short" ? "shorts" : "videos"} cargados
                 </span>
-                <span data-testid={`${kind}-${sectionKey}-hint`}>Se muestran los disponibles sin limitar por fecha.</span>
+                <span data-testid={`${kind}-${sectionKey}-hint`}>Se actualizan automáticamente cada minuto.</span>
             </div>
             <div className={gridCls}>
-                {videos.map((v) => (
-                    <div key={v.video_id} data-testid={`${kind}-${sectionKey}-video-${v.video_id}`} className="group rounded-xl bg-[#111113] border border-white/10 hover:border-white/20 overflow-hidden transition-all">
-                    <a href={v.url} target="_blank" rel="noreferrer" className="block">
-                        <div className={`relative ${isShort ? "aspect-[9/16]" : "aspect-video"} overflow-hidden bg-black`}>
-                            <img src={v.thumbnail_url} alt={v.title} className="w-full h-full object-cover group-hover:scale-105 transition duration-500" />
-                            <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent" />
-                            <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition">
-                                <div className="w-12 h-12 rounded-full celeb-bg flex items-center justify-center">
-                                    <Play className="w-5 h-5 text-black fill-black ml-0.5" />
+                {videos.map((v) => {
+                    const chapCount = !isShort && v.duration_seconds > 300 ? countChapters(v.description) : 0;
+                    const pct = Math.round(((v.view_count || 0) / maxViews) * 100);
+                    const barColor = pct >= 75 ? "#FF3B30" : pct >= 40 ? "#FACC15" : "#71717A";
+                    return (
+                        <div key={v.video_id} data-testid={`${kind}-${sectionKey}-video-${v.video_id}`} className="group rounded-xl bg-[#111113] border border-white/10 hover:border-white/20 overflow-hidden transition-all">
+                            <a href={v.url} target="_blank" rel="noreferrer" className="block">
+                                <div className={`relative ${isShort ? "aspect-[9/16]" : "aspect-video"} overflow-hidden bg-black`}>
+                                    <img src={v.thumbnail_url} alt={v.title} className="w-full h-full object-cover group-hover:scale-105 transition duration-500" />
+                                    <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent" />
+                                    <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition">
+                                        <div className="w-12 h-12 rounded-full celeb-bg flex items-center justify-center">
+                                            <Play className="w-5 h-5 text-black fill-black ml-0.5" />
+                                        </div>
+                                    </div>
+                                    {/* Channel badge (only when there are secondary channels) */}
+                                    {hasMultipleChannels && v.channel_title && (
+                                        <div className="absolute top-2 left-2 text-[9px] font-bold text-white bg-black/70 px-1.5 py-0.5 rounded backdrop-blur-sm max-w-[120px] truncate">
+                                            {v.channel_title}
+                                        </div>
+                                    )}
+                                    {/* Viral score badge */}
+                                    {v.viral_score != null && (
+                                        <div
+                                            data-testid={`viral-score-${v.video_id}`}
+                                            className="absolute top-2 right-2 px-2 py-1 rounded-md font-display font-black text-xs text-black shadow-lg flex items-center gap-1"
+                                            style={{ background: scoreColor(v.viral_score) }}
+                                            title={`Score viral ${v.viral_score}/100`}
+                                        >
+                                            <Flame className="w-3 h-3" strokeWidth={3} />
+                                            {v.viral_score}
+                                        </div>
+                                    )}
+                                    <div className="absolute bottom-2 left-2 text-[10px] uppercase tracking-widest font-bold text-white/80">
+                                        {timeAgo(v.published_at)}
+                                    </div>
+                                    {v.duration_seconds > 0 && (
+                                        <div className="absolute bottom-2 right-2 text-[10px] font-bold text-white bg-black/70 px-1.5 py-0.5 rounded">
+                                            {Math.floor(v.duration_seconds / 60)}:{String(v.duration_seconds % 60).padStart(2, "0")}
+                                        </div>
+                                    )}
+                                </div>
+                                <div className="p-3">
+                                    <h4 className={`font-medium text-white line-clamp-2 leading-snug ${isShort ? "text-xs min-h-[2rem]" : "text-sm min-h-[2.5rem]"}`}>
+                                        {v.title}
+                                    </h4>
+                                    <div className="flex items-center gap-3 mt-2 text-[10px] text-white/40">
+                                        <span className="flex items-center gap-1"><Eye className="w-3 h-3" /> {fmtNumber(v.view_count)}</span>
+                                        {!isShort && (
+                                            <>
+                                                <span className="flex items-center gap-1"><ThumbsUp className="w-3 h-3" /> {fmtNumber(v.like_count)}</span>
+                                                <span className="flex items-center gap-1"><MessageCircle className="w-3 h-3" /> {fmtNumber(v.comment_count)}</span>
+                                            </>
+                                        )}
+                                    </div>
+                                </div>
+                            </a>
+                            {/* Relative performance bar (YouTube-style) */}
+                            <div className="mt-0 px-3 pb-2">
+                                <div className="flex items-center justify-between text-[9px] text-white/25 mb-0.5">
+                                    <span>Rendimiento</span>
+                                    <span className="font-bold" style={{ color: barColor }}>{pct}%</span>
+                                </div>
+                                <div className="w-full h-1 bg-white/10 rounded-full overflow-hidden">
+                                    <div
+                                        className="h-full rounded-full transition-all duration-700"
+                                        style={{ width: `${pct}%`, background: barColor }}
+                                    />
                                 </div>
                             </div>
-                            {/* Viral score badge */}
-                            {v.viral_score != null && (
-                                <div
-                                    data-testid={`viral-score-${v.video_id}`}
-                                    className="absolute top-2 right-2 px-2 py-1 rounded-md font-display font-black text-xs text-black shadow-lg flex items-center gap-1"
-                                    style={{ background: scoreColor(v.viral_score) }}
-                                    title={`Score viral ${v.viral_score}/100`}
-                                >
-                                    <Flame className="w-3 h-3" strokeWidth={3} />
-                                    {v.viral_score}
-                                </div>
-                            )}
-                            <div className="absolute bottom-2 left-2 text-[10px] uppercase tracking-widest font-bold text-white/80">
-                                {timeAgo(v.published_at)}
-                            </div>
-                            {v.duration_seconds > 0 && (
-                                <div className="absolute bottom-2 right-2 text-[10px] font-bold text-white bg-black/70 px-1.5 py-0.5 rounded">
-                                    {Math.floor(v.duration_seconds / 60)}:{String(v.duration_seconds % 60).padStart(2, "0")}
-                                </div>
-                            )}
-                        </div>
-                        <div className="p-3">
-                            <h4 className={`font-medium text-white line-clamp-2 leading-snug ${isShort ? "text-xs min-h-[2rem]" : "text-sm min-h-[2.5rem]"}`}>
-                                {v.title}
-                            </h4>
-                            <div className="flex items-center gap-3 mt-2 text-[10px] text-white/40">
-                                <span className="flex items-center gap-1"><Eye className="w-3 h-3" /> {fmtNumber(v.view_count)}</span>
-                                {!isShort && (
+                            {/* Smart clips badge (only for long videos) */}
+                            {!isShort && v.duration_seconds > 300 && (
+                                chapCount > 0 ? (
                                     <>
-                                        <span className="flex items-center gap-1"><ThumbsUp className="w-3 h-3" /> {fmtNumber(v.like_count)}</span>
-                                        <span className="flex items-center gap-1"><MessageCircle className="w-3 h-3" /> {fmtNumber(v.comment_count)}</span>
+                                        <button
+                                            onClick={() => onShowClips && onShowClips(v)}
+                                            data-testid={`detect-clips-${v.video_id}`}
+                                            className="w-full px-3 py-2 border-t border-white/10 text-xs font-bold celeb-text hover:bg-white/5 transition flex items-center justify-center gap-1.5"
+                                        >
+                                            <Scissors className="w-3 h-3" /> {chapCount} clips detectables
+                                        </button>
+                                        <p className="text-[9px] text-white/25 text-center pb-1.5">
+                                            Segmentos tipo 12:36 → 16:15
+                                        </p>
                                     </>
-                                )}
-                            </div>
+                                ) : (
+                                    <div className="w-full px-3 py-1.5 border-t border-white/5 text-[10px] text-white/20 text-center">
+                                        Sin chapters
+                                    </div>
+                                )
+                            )}
                         </div>
-                    </a>
-                    {!isShort && onShowClips && v.duration_seconds > 300 && (
-                        <button
-                            onClick={() => onShowClips(v)}
-                            data-testid={`detect-clips-${v.video_id}`}
-                            className="w-full px-3 py-2 border-t border-white/10 text-xs font-bold text-white/70 hover:celeb-text hover:bg-white/5 transition flex items-center justify-center gap-1.5"
-                        >
-                            <Scissors className="w-3 h-3" /> Detectar clips virales
-                        </button>
-                    )}
-                    </div>
-                ))}
+                    );
+                })}
             </div>
         </div>
     );
