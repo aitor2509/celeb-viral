@@ -3,12 +3,11 @@ import { useParams, useNavigate } from "react-router-dom";
 import { api, fmtNumber, timeAgo } from "@/lib/api";
 import { useApp } from "@/lib/AppContext";
 import {
-    ExternalLink, Phone, Plus, Flame, Trash2, ArrowLeft, RefreshCw, Video, Film, Newspaper, Megaphone,
+    ExternalLink, Phone, Plus, Flame, Trash2, ArrowLeft, Video, Film, Megaphone,
 } from "lucide-react";
 import AddViralDialog from "@/components/AddViralDialog";
 import AddContactDialog from "@/components/AddContactDialog";
 import VideoSection from "@/components/VideoSection";
-import NewsSection from "@/components/NewsSection";
 import SecondaryChannels from "@/components/SecondaryChannels";
 import { toast } from "sonner";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
@@ -23,8 +22,6 @@ const CelebrityDetail = () => {
     const [celeb, setCeleb] = useState(null);
     const [virals, setVirals] = useState([]);
     const [loading, setLoading] = useState(true);
-    const [refreshing, setRefreshing] = useState(false);
-    const [videoRefreshSignal, setVideoRefreshSignal] = useState(0);
     const [viralOpen, setViralOpen] = useState(false);
     const [contactOpen, setContactOpen] = useState(false);
 
@@ -45,23 +42,6 @@ const CelebrityDetail = () => {
     }, [id, setSelectedColor]);
 
     useEffect(() => { loadCeleb(); }, [loadCeleb]);
-
-    const handleRefresh = async () => {
-        setRefreshing(true);
-        try {
-            await api.get(`/celebrities/${id}/videos`, { params: { refresh: true } });
-            await loadCeleb();
-            setVideoRefreshSignal((current) => current + 1);
-            setTimeout(() => setVideoRefreshSignal((current) => current + 1), 15000);
-            setTimeout(() => setVideoRefreshSignal((current) => current + 1), 45000);
-            toast.success("Actualización iniciada. Espera 1-2 minutos y revisa de nuevo.");
-        } catch (e) {
-            console.error(e);
-            toast.error("Error al iniciar actualización");
-        } finally {
-            setRefreshing(false);
-        }
-    };
 
     const handleDeleteViral = async (vid) => {
         await api.delete(`/virals/${vid}`);
@@ -124,9 +104,6 @@ const CelebrityDetail = () => {
                             <button onClick={() => setContactOpen(true)} data-testid="add-contact-btn" className="h-10 px-4 rounded-lg border celeb-border celeb-text text-sm font-bold hover:bg-white/5 flex items-center gap-2 transition">
                                 <Phone className="w-4 h-4" /> Suscribirme
                             </button>
-                            <button onClick={handleRefresh} disabled={refreshing} data-testid="refresh-celebrity-btn" className="h-10 px-4 rounded-lg bg-[#1a1a1d] border border-white/10 text-white/70 hover:text-white text-sm font-bold flex items-center gap-2 disabled:opacity-50">
-                                <RefreshCw className={`w-4 h-4 ${refreshing ? "animate-spin" : ""}`} /> Actualizar
-                            </button>
                             <button onClick={handleDeleteCelebrity} data-testid="delete-celebrity-btn" className="h-10 px-3 rounded-lg bg-transparent border border-white/10 text-white/40 hover:text-red-400 hover:border-red-400/50 text-sm flex items-center gap-2 transition">
                                 <Trash2 className="w-4 h-4" />
                             </button>
@@ -147,24 +124,17 @@ const CelebrityDetail = () => {
                     <TabsTrigger value="shorts" data-testid="tab-shorts" className="data-[state=active]:bg-white data-[state=active]:text-black data-[state=active]:font-bold px-4 py-2 flex items-center gap-1.5">
                         <Film className="w-3.5 h-3.5" /> Shorts
                     </TabsTrigger>
-                    <TabsTrigger value="news" data-testid="tab-news" className="data-[state=active]:bg-white data-[state=active]:text-black data-[state=active]:font-bold px-4 py-2 flex items-center gap-1.5">
-                        <Newspaper className="w-3.5 h-3.5" /> Noticias
-                    </TabsTrigger>
                     <TabsTrigger value="funas" data-testid="tab-funas" className="data-[state=active]:bg-white data-[state=active]:text-black data-[state=active]:font-bold px-4 py-2 flex items-center gap-1.5">
                         <Megaphone className="w-3.5 h-3.5" /> Funas manuales
                     </TabsTrigger>
                 </TabsList>
 
                 <TabsContent value="videos" className="mt-6">
-                    <VideoSection key={`${celeb.id}-video`} celebrity={celeb} kind="video" refreshSignal={videoRefreshSignal} onCelebrityUpdate={loadCeleb} />
+                    <VideoSection key={`${celeb.id}-video`} celebrity={celeb} kind="video" onCelebrityUpdate={loadCeleb} />
                 </TabsContent>
 
                 <TabsContent value="shorts" className="mt-6">
-                    <VideoSection key={`${celeb.id}-short`} celebrity={celeb} kind="short" refreshSignal={videoRefreshSignal} onCelebrityUpdate={loadCeleb} />
-                </TabsContent>
-
-                <TabsContent value="news" className="mt-6">
-                    <NewsSection celebrity={celeb} />
+                    <VideoSection key={`${celeb.id}-short`} celebrity={celeb} kind="short" onCelebrityUpdate={loadCeleb} />
                 </TabsContent>
 
                 <TabsContent value="funas" className="mt-6">
