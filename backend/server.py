@@ -38,19 +38,6 @@ MIN_RESULTS_PER_SECTION = 50
 RECENT_UPLOAD_SCAN_LIMIT = 250
 VIRAL_CHANNEL_SCAN_LIMIT = 200
 VIDEO_RESPONSE_LIMIT = 200
-VIDEO_BOMB_VIEWS_THRESHOLD = 50000  # ajustable según el canal
-
-
-def is_video_bomb(video: dict) -> bool:
-    """Detect 'video bomba': high view-count video published in the last 48h."""
-    try:
-        views = int(video.get("view_count", 0))
-        pub = video.get("published_at", "")
-        pub_dt = datetime.fromisoformat(pub.replace("Z", "+00:00"))
-        hours_old = (datetime.now(timezone.utc) - pub_dt).total_seconds() / 3600
-        return views >= VIDEO_BOMB_VIEWS_THRESHOLD and hours_old <= 48
-    except Exception:
-        return False
 
 
 # ===== Models =====
@@ -522,21 +509,26 @@ async def refresh_celebrity_videos(celeb_id: str, channel_id: str = None, notify
         existing_ids.add(v["video_id"])
     had_previous = len(existing_ids) > 0
     all_new = []
+    # Deduplicar entre canales: el canal principal (primero en la lista) tiene prioridad
+    seen_video_ids = {}
+    channel_subs = celeb.get("subscriber_count", 1)
     for ch_id in channels_to_fetch:
         videos = await fetch_latest_videos(ch_id, max_results=RECENT_UPLOAD_SCAN_LIMIT)
-        # compute viral score per video using main channel subs
-        channel_subs = celeb.get("subscriber_count", 1)
         for v in videos:
             v["viral_score"] = compute_viral_score(v, channel_subs)
-        new_videos = [v for v in videos if v["video_id"] not in existing_ids]
-        all_new.extend(new_videos)
-        for v in videos:
-            doc = CelebrityVideo(celebrity_id=celeb_id, **v).model_dump()
-            await db.videos.update_one(
-                {"celebrity_id": celeb_id, "video_id": v["video_id"]},
-                {"$set": doc},
-                upsert=True,
-            )
+            if v["video_id"] not in seen_video_ids:
+                seen_video_ids[v["video_id"]] = v
+    # Procesar solo videos únicos
+    unique_videos = list(seen_video_ids.values())
+    new_videos = [v for v in unique_videos if v["video_id"] not in existing_ids]
+    all_new.extend(new_videos)
+    for v in unique_videos:
+        doc = CelebrityVideo(celebrity_id=celeb_id, **v).model_dump()
+        await db.videos.update_one(
+            {"celebrity_id": celeb_id, "video_id": v["video_id"]},
+            {"$set": doc},
+            upsert=True,
+        )
     await db.video_refresh_state.update_one(
         {"_key": f"{celeb_id}:uploads"},
         {"$set": {
@@ -551,27 +543,15 @@ async def refresh_celebrity_videos(celeb_id: str, channel_id: str = None, notify
     if notify and had_previous:
         for v in all_new:
             label = "short" if v["is_short"] else "video"
-            is_bomb = is_video_bomb(v)
-            if is_bomb:
-                try:
-                    views_k = int(v.get("view_count", 0) / 1000)
-                except Exception:
-                    views_k = 0
-                notif_type = "video_bomb"
-                notif_title = f"💣 {celeb['name']} BOMBA: {views_k}K views"
-            else:
-                notif_type = "new_video"
-                notif_title = f"{celeb['name']} subió un nuevo {label}"
             notif = Notification(
                 celebrity_id=celeb_id,
                 celebrity_name=celeb["name"],
                 celebrity_color=celeb["color"],
-                type=notif_type,
-                title=notif_title,
+                type="new_video",
+                title=f"{celeb['name']} subió un nuevo {label}",
                 message=v["title"],
                 link=v["url"],
                 image_url=v["thumbnail_url"],
-                created_at=v["published_at"],
             )
             await db.notifications.insert_one(notif.model_dump())
     return all_new
@@ -608,9 +588,8 @@ async def get_celebrity_videos(celeb_id: str, kind: str = "video", sort: str = "
     seen = set()
     videos = []
     for v in raw:
-        vid = v.get("video_id")
-        if vid and vid not in seen:
-            seen.add(vid)
+        if v["video_id"] not in seen:
+            seen.add(v["video_id"])
             videos.append(v)
     return {"videos": videos[:VIDEO_RESPONSE_LIMIT]}
 
@@ -724,62 +703,6 @@ def _potential_score(video: dict, channel_subs: int) -> float:
     return (v_score * 0.5 + e_score * 0.3 + r_score * 0.2)
 
 
-async def expand_keywords_with_ai(keywords: list, celebrity_name: str) -> list:
-    """
-    Usa LLaMA via Groq para expandir keywords con sinónimos, variantes y términos
-    relacionados en contexto de medios y entretenimiento LATAM. Si falla, devuelve
-    keywords originales.
-    """
-    if not keywords:
-        return []
-    api_key = os.environ.get("GROQ_API_KEY")
-    if not api_key:
-        return keywords
-
-    try:
-        groq_client = Groq(api_key=api_key)
-        keywords_str = ", ".join(keywords)
-        prompt = (
-            f"Contexto: canal de YouTube de {celebrity_name} en México/LATAM.\n"
-            f"Keywords del usuario: {keywords_str}\n\n"
-            f"Tarea: Para cada keyword genera 5-8 sinónimos, variantes, términos relacionados "
-            f"y palabras que frecuentemente aparecen en títulos de YouTube sobre ese tema en español LATAM. "
-            f"Incluye variantes con/sin acento, abreviaciones, nombres propios relevantes.\n\n"
-            f"Responde SOLO con JSON válido, sin markdown:\n"
-            f'[["keyword_original", "sinonimo1", "sinonimo2"], ...]'
-        )
-        msg = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            max_tokens=500,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        raw = msg.choices[0].message.content.strip()
-        raw = re.sub(r"```json|```", "", raw).strip()
-        # Try to find the JSON array in case the model wraps it
-        match = re.search(r"\[.*\]", raw, re.DOTALL)
-        if match:
-            raw = match.group(0)
-        expanded_groups = json.loads(raw)
-        all_terms = list(keywords)
-        for group in expanded_groups:
-            if isinstance(group, list):
-                for t in group:
-                    if isinstance(t, str) and len(t.strip()) >= 2:
-                        all_terms.append(t.lower().strip())
-        # Deduplicate preserving order
-        seen = set()
-        deduped = []
-        for t in all_terms:
-            tl = t.lower().strip()
-            if tl and tl not in seen:
-                seen.add(tl)
-                deduped.append(tl)
-        return deduped
-    except Exception as e:
-        logging.warning(f"Keyword expansion failed, using originals: {e}")
-        return keywords
-
-
 @api_router.post("/celebrities/{celeb_id}/recommendations")
 async def get_hybrid_recommendations(celeb_id: str, kind: str = "video"):
     """
@@ -794,11 +717,7 @@ async def get_hybrid_recommendations(celeb_id: str, kind: str = "video"):
 
     is_short = kind == "short"
     trending_context = celeb.get("trending_context", "").strip()
-    trend_keywords_raw = _extract_trend_keywords(trending_context)
-    if trend_keywords_raw and os.environ.get("GROQ_API_KEY"):
-        trend_keywords = await expand_keywords_with_ai(trend_keywords_raw, celeb["name"])
-    else:
-        trend_keywords = trend_keywords_raw
+    trend_keywords = _extract_trend_keywords(trending_context)
     channel_subs = celeb.get("subscriber_count", 1)
 
     # --- Obtener todos los videos disponibles ---
@@ -833,28 +752,72 @@ async def get_hybrid_recommendations(celeb_id: str, kind: str = "video"):
     cat_b = [v for v in historical_pool if v["video_id"] not in cat_a_ids][:10]
     cat_b_ids = {v["video_id"] for v in cat_b}
 
-    # --- CATEGORÍA C: Por tendencias ---
-    # Videos cuyo título/descripción conecta con las tendencias actuales
-    # Incluye videos viejos que "resurgen" por el tema (efecto BTS/Franco)
+    # --- CATEGORÍA C: Búsqueda semántica con IA ---
     excluded_ids = cat_a_ids | cat_b_ids
-    if trend_keywords:
-        trend_pool = [v for v in all_videos if v["video_id"] not in excluded_ids]
-        trend_pool.sort(key=lambda v: _matches_trends(v, trend_keywords) * 0.7 + _potential_score(v, channel_subs) * 0.3, reverse=True)
-        cat_c = [v for v in trend_pool if _matches_trends(v, trend_keywords) > 0][:10]
-        # Si no hay suficientes con match, completar con los de mayor potencial restantes
-        if len(cat_c) < 10:
-            remaining = [v for v in trend_pool if v not in cat_c]
-            cat_c += remaining[:10 - len(cat_c)]
-    else:
-        # Sin tendencias definidas, usar los de mayor engagement relativo
-        trend_pool = sorted(
-            [v for v in all_videos if v["video_id"] not in excluded_ids],
-            key=lambda v: _potential_score(v, channel_subs), reverse=True
-        )
-        cat_c = trend_pool[:10]
-
-    # --- Llamar a IA para redactar razones (no decide el ranking) ---
+    trend_pool = [v for v in all_videos if v["video_id"] not in excluded_ids]
     api_key = os.environ.get("GROQ_API_KEY")
+
+    if trending_context and api_key and trend_pool:
+        candidates_for_ai = trend_pool[:80]
+        candidates_txt = "\n".join([
+            f"[{i}] video_id:{v['video_id']} | \"{v['title']}\" | {v.get('view_count', 0):,} vistas | {v.get('published_at', '')[:10]}"
+            for i, v in enumerate(candidates_for_ai)
+        ])
+        selection_prompt = (
+            f"Eres experto en marketing viral latinoamericano.\n"
+            f"Canal: {celeb['name']}\n"
+            f"Contexto trending actual: {trending_context}\n\n"
+            f"TAREA: De estos {len(candidates_for_ai)} videos del canal, selecciona los 10 que MÁS conectan "
+            f"con el contexto trending actual. Considera:\n"
+            f"- Conexión temática aunque sea indirecta\n"
+            f"- Conexión por contexto cultural, aunque no mencione exactamente las palabras clave\n"
+            f"- Videos que podrían 'resurgir' porque el tema vuelve a ser relevante\n"
+            f"- Videos donde el personaje habla de algo que HOY está en tendencia\n\n"
+            f"VIDEOS DISPONIBLES:\n{candidates_txt}\n\n"
+            f"Responde SOLO con JSON válido sin markdown:\n"
+            f'{{"selected": [{{"video_id": "...", "reason": "Por qué conecta con la tendencia (1 frase)"}}]}}'
+        )
+        try:
+            groq_client_c = Groq(api_key=api_key)
+            sel_msg = groq_client_c.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                max_tokens=1000,
+                messages=[{"role": "user", "content": selection_prompt}]
+            )
+            raw_sel = sel_msg.choices[0].message.content.strip()
+            raw_sel = re.sub(r"```json|```", "", raw_sel).strip()
+            sel_data = json.loads(raw_sel)
+            selected_ids_ordered = [s["video_id"] for s in sel_data.get("selected", [])]
+            ai_trend_reasons = {s["video_id"]: s.get("reason", "") for s in sel_data.get("selected", [])}
+            video_by_id = {v["video_id"]: v for v in candidates_for_ai}
+            cat_c = []
+            for vid_id in selected_ids_ordered:
+                if vid_id in video_by_id and len(cat_c) < 10:
+                    v = dict(video_by_id[vid_id])
+                    v["ai_trend_reason"] = ai_trend_reasons.get(vid_id, "")
+                    cat_c.append(v)
+            # Si la IA devolvió menos de 10, completar con los de mayor potencial
+            if len(cat_c) < 10:
+                used = {v["video_id"] for v in cat_c}
+                remaining = [v for v in trend_pool if v["video_id"] not in used]
+                remaining.sort(key=lambda v: _potential_score(v, channel_subs), reverse=True)
+                cat_c += remaining[:10 - len(cat_c)]
+        except Exception as e:
+            logging.warning(f"AI trend selection failed, falling back to keyword match: {e}")
+            if trend_keywords:
+                trend_pool.sort(key=lambda v: _matches_trends(v, trend_keywords) * 0.7 + _potential_score(v, channel_subs) * 0.3, reverse=True)
+                cat_c = trend_pool[:10]
+            else:
+                cat_c = sorted(trend_pool, key=lambda v: _potential_score(v, channel_subs), reverse=True)[:10]
+    else:
+        if trend_keywords:
+            trend_pool.sort(key=lambda v: _matches_trends(v, trend_keywords) * 0.7 + _potential_score(v, channel_subs) * 0.3, reverse=True)
+            cat_c = [v for v in trend_pool if _matches_trends(v, trend_keywords) > 0][:10]
+            if len(cat_c) < 10:
+                remaining = [v for v in trend_pool if v not in cat_c]
+                cat_c += remaining[:10 - len(cat_c)]
+        else:
+            cat_c = sorted(trend_pool, key=lambda v: _potential_score(v, channel_subs), reverse=True)[:10]
     ai_reasons = {}
     overall_strategy = ""
 
@@ -910,6 +873,7 @@ async def get_hybrid_recommendations(celeb_id: str, kind: str = "video"):
                 "category_label": category_label,
                 "reason": exp.get("reason", ""),
                 "prediction": exp.get("prediction", ""),
+                "ai_trend_reason": v.get("ai_trend_reason", "") if category_key == "trend" else "",
                 "trend_match": ", ".join(trend_keywords[:3]) if category_key == "trend" and trend_keywords else "—",
                 "video": v,
             })
@@ -924,10 +888,9 @@ async def get_hybrid_recommendations(celeb_id: str, kind: str = "video"):
     return {
         "recommendations": recommendations,
         "strategy": overall_strategy,
-        "trend_keywords_used": trend_keywords_raw,
-        "trend_keywords_expanded": trend_keywords[:20],
+        "trend_keywords_used": trend_keywords,
         "counts": {"recent": len(cat_a), "viral": len(cat_b), "trend": len(cat_c)},
-        "model": "hybrid_v3_semantic",
+        "model": "hybrid_v2",
     }
 
 
@@ -1068,24 +1031,16 @@ async def get_viral_videos(celeb_id: str, kind: str = "video", refresh: bool = F
         asyncio.create_task(refresh_viral_cache_for_celebrity(celeb, kind))
         fallback = cache.get("videos", []) if cache else []
         if not fallback:
-            raw = await db.videos.find(
+            fallback = await db.videos.find(
                 {"celebrity_id": celeb_id, "is_short": is_short}, {"_id": 0}
-            ).sort("view_count", -1).to_list(VIDEO_RESPONSE_LIMIT * 2)
-            seen = set()
-            fallback = []
-            for v in raw:
-                vid = v.get("video_id")
-                if vid and vid not in seen:
-                    seen.add(vid)
-                    fallback.append(v)
-            fallback = fallback[:VIDEO_RESPONSE_LIMIT]
+            ).sort("view_count", -1).to_list(VIDEO_RESPONSE_LIMIT)
         return {"videos": fallback, "refreshing": True}
     return {"videos": cache.get("videos", [])}
 
 
 @api_router.get("/celebrities/{celeb_id}/videos/{video_id}/clips")
 async def get_video_clips(celeb_id: str, video_id: str):
-    """Detect viral clip segments from video chapters in description. Free, no API."""
+    """Detect viral clip segments. Uses chapters if available, otherwise AI-generated segments."""
     video = await db.videos.find_one(
         {"celebrity_id": celeb_id, "video_id": video_id}, {"_id": 0},
     )
@@ -1100,31 +1055,134 @@ async def get_video_clips(celeb_id: str, video_id: str):
                 break
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
-    chapters = parse_chapters(video.get("description", ""), video.get("duration_seconds", 0))
-    if not chapters:
+
+    duration = video.get("duration_seconds", 0)
+    chapters = parse_chapters(video.get("description", ""), duration)
+
+    if chapters:
+        # Flujo original: chapters detectados de la descripción
+        scored = []
+        for c in chapters:
+            c_copy = dict(c)
+            c_copy["clip_score"] = score_chapter_for_clip(c)
+            c_copy["link"] = f"https://www.youtube.com/watch?v={video_id}&t={c['start']}s"
+            c_copy["source"] = "chapters"
+            scored.append(c_copy)
+        clips = sorted(scored, key=lambda x: x["clip_score"], reverse=True)[:10]
+        return {
+            "video_id": video_id,
+            "video_title": video.get("title"),
+            "video_url": video.get("url"),
+            "chapters": scored,
+            "clips": clips,
+            "source": "chapters",
+        }
+
+    # Sin chapters: usar IA para generar segmentos recomendados
+    api_key = os.environ.get("GROQ_API_KEY")
+    if not api_key or duration < 60:
         return {
             "video_id": video_id,
             "video_title": video.get("title"),
             "chapters": [],
             "clips": [],
-            "message": "Este video no tiene capítulos/timestamps en la descripción. No se pueden detectar clips automáticamente.",
+            "message": "Este video no tiene capítulos y no hay IA disponible para analizarlo.",
         }
-    scored = []
-    for c in chapters:
-        c_copy = dict(c)
-        c_copy["clip_score"] = score_chapter_for_clip(c)
-        # build link with timestamp
-        c_copy["link"] = f"https://www.youtube.com/watch?v={video_id}&t={c['start']}s"
-        scored.append(c_copy)
-    # top suggested clips (sorted by score, take top 10)
-    clips = sorted(scored, key=lambda x: x["clip_score"], reverse=True)[:10]
-    return {
-        "video_id": video_id,
-        "video_title": video.get("title"),
-        "video_url": video.get("url"),
-        "chapters": scored,
-        "clips": clips,
-    }
+
+    try:
+        groq_client_clips = Groq(api_key=api_key)
+        total_min = duration // 60
+        total_sec = duration % 60
+        duration_str = f"{total_min}:{total_sec:02d}"
+        description_snippet = (video.get("description", "") or "")[:800] or "(sin descripción)"
+
+        prompt = (
+            f"Eres experto en edición de video para YouTube y redes sociales en México/LATAM.\n"
+            f"Analiza este video y propón los mejores segmentos para hacer clips virales.\n\n"
+            f"VIDEO:\n"
+            f"Título: {video.get('title')}\n"
+            f"Duración total: {duration_str} minutos\n"
+            f"Vistas: {video.get('view_count', 0):,}\n"
+            f"Descripción: {description_snippet}\n\n"
+            f"INSTRUCCIONES:\n"
+            f"- Propón entre 4 y 8 segmentos específicos\n"
+            f"- Cada segmento debe durar entre 1 y 8 minutos\n"
+            f"- Los tiempos deben estar dentro de la duración total ({duration_str})\n"
+            f"- Basa los segmentos en el título, descripción y el contenido probable del video\n"
+            f"- Prioriza: confesiones, confrontaciones, humor, revelaciones, datos sorprendentes\n"
+            f"- Ponle un nombre descriptivo y viral a cada segmento\n\n"
+            f"Responde SOLO con JSON válido sin markdown:\n"
+            f'[{{"start_ts": "MM:SS", "end_ts": "MM:SS", "start_seconds": 0, "end_seconds": 0, "topic": "Nombre del clip", "reason": "Por qué es viral", "clip_score": 75}}]'
+        )
+
+        msg = groq_client_clips.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            max_tokens=1500,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        raw = msg.choices[0].message.content.strip()
+        raw = re.sub(r"```json|```", "", raw).strip()
+        ai_clips = json.loads(raw)
+
+        def fmt_ts(s):
+            h = s // 3600
+            m = (s % 3600) // 60
+            sec = s % 60
+            if h > 0:
+                return f"{h}:{m:02d}:{sec:02d}"
+            return f"{m}:{sec:02d}"
+
+        def parse_ts(ts_str):
+            parts = ts_str.split(":")
+            try:
+                if len(parts) == 2:
+                    return int(parts[0]) * 60 + int(parts[1])
+                elif len(parts) == 3:
+                    return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+            except Exception:
+                pass
+            return 0
+
+        clips = []
+        for c in ai_clips:
+            start_s = c.get("start_seconds") or parse_ts(c.get("start_ts", "0:00"))
+            end_s = c.get("end_seconds") or parse_ts(c.get("end_ts", "0:00"))
+            if end_s <= start_s:
+                end_s = min(start_s + 180, duration)
+            clip = {
+                "start": start_s,
+                "end": end_s,
+                "ts": c.get("start_ts") or fmt_ts(start_s),
+                "end_ts": c.get("end_ts") or fmt_ts(end_s),
+                "duration": end_s - start_s,
+                "topic": c.get("topic", "Segmento"),
+                "reason": c.get("reason", ""),
+                "clip_score": min(95, max(40, int(c.get("clip_score", 70)))),
+                "link": f"https://www.youtube.com/watch?v={video_id}&t={start_s}s",
+                "source": "ai",
+            }
+            clips.append(clip)
+
+        clips = sorted(clips, key=lambda x: x["clip_score"], reverse=True)[:8]
+        return {
+            "video_id": video_id,
+            "video_title": video.get("title"),
+            "video_url": video.get("url"),
+            "chapters": [],
+            "clips": clips,
+            "source": "ai",
+            "message": "Segmentos generados por IA basados en el contenido del video.",
+        }
+
+    except Exception as e:
+        logging.warning(f"AI clip generation failed for {video_id}: {e}")
+        return {
+            "video_id": video_id,
+            "video_title": video.get("title"),
+            "chapters": [],
+            "clips": [],
+            "message": "No se pudieron generar clips automáticamente.",
+        }
 
 
 # ===== Routes: Virals =====
