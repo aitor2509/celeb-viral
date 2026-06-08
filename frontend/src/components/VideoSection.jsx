@@ -273,6 +273,11 @@ const VideoSection = ({ celebrity, kind, refreshSignal = 0, onCelebrityUpdate })
                                     📋 Chapters detectados
                                 </span>
                             )}
+                            {clipsModal?.data?.source === "peaks" && (
+                                <span className="text-[10px] bg-orange-500/20 text-orange-300 border border-orange-500/30 px-2 py-0.5 rounded-full font-medium">
+                                    🔥 Picos de retención YouTube
+                                </span>
+                            )}
                         </DialogTitle>
                         <DialogDescription className="text-white/50 line-clamp-2">
                             {clipsModal?.video?.title}
@@ -296,6 +301,8 @@ const VideoSection = ({ celebrity, kind, refreshSignal = 0, onCelebrityUpdate })
                             <p className="text-xs text-white/40">
                                 {clipsModal.data.source === "ai"
                                     ? "Segmentos recomendados por IA. Click para abrir en YouTube en ese minuto exacto."
+                                    : clipsModal.data.source === "peaks"
+                                    ? "Segmentos con mayor retención (Most Replayed). Click para abrir en YouTube."
                                     : "Top segmentos rankeados por duración óptima + heat de keywords. Click para abrir en YouTube."}
                             </p>
                             {clipsModal.data.clips.map((c, i) => (
