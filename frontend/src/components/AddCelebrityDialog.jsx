@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import {
     Dialog,
     DialogContent,
@@ -9,15 +9,10 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
-import { Search, Check } from "lucide-react";
+import { Search, Loader2 } from "lucide-react";
 import { api } from "@/lib/api";
 import { toast } from "sonner";
 import { useApp } from "@/lib/AppContext";
-
-const PRESET_COLORS = [
-    "#007AFF", "#FF6B00", "#00FF66", "#FF3B30", "#FF007F",
-    "#8B5CF6", "#FACC15", "#06B6D4", "#EC4899", "#10B981",
-];
 
 const AddCelebrityDialog = ({ open, onOpenChange }) => {
     const { loadCelebrities } = useApp();
@@ -27,7 +22,8 @@ const AddCelebrityDialog = ({ open, onOpenChange }) => {
     const [results, setResults] = useState([]);
     const [selected, setSelected] = useState(null);
     const [name, setName] = useState("");
-    const [color, setColor] = useState(PRESET_COLORS[0]);
+    const [color, setColor] = useState(null); // null = loading
+    const [colorLoading, setColorLoading] = useState(false);
     const [saving, setSaving] = useState(false);
 
     const reset = () => {
@@ -36,8 +32,19 @@ const AddCelebrityDialog = ({ open, onOpenChange }) => {
         setResults([]);
         setSelected(null);
         setName("");
-        setColor(PRESET_COLORS[0]);
+        setColor(null);
     };
+
+    // Auto-extract color when a channel is selected
+    useEffect(() => {
+        if (!selected?.thumbnail) return;
+        setColorLoading(true);
+        setColor(null);
+        api.get("/utils/extract-color", { params: { image_url: selected.thumbnail } })
+            .then((res) => setColor(res.data.color || "#007AFF"))
+            .catch(() => setColor("#007AFF"))
+            .finally(() => setColorLoading(false));
+    }, [selected]);
 
     const handleSearch = async (e) => {
         e?.preventDefault();
@@ -66,7 +73,7 @@ const AddCelebrityDialog = ({ open, onOpenChange }) => {
         try {
             await api.post("/celebrities", {
                 name,
-                color,
+                color: color || undefined, // let backend auto-extract if still null
                 youtube_channel_id: selected.channel_id,
                 image_url: selected.thumbnail,
             });
@@ -90,7 +97,7 @@ const AddCelebrityDialog = ({ open, onOpenChange }) => {
                         {step === 1 ? "Buscar personaje en YouTube" : "Personalizar"}
                     </DialogTitle>
                     <DialogDescription className="text-white/50">
-                        {step === 1 ? "Busca el canal oficial del personaje" : "Asigna nombre y color de marca"}
+                        {step === 1 ? "Busca el canal oficial del personaje" : "Confirma el nombre y el color se detecta solo"}
                     </DialogDescription>
                 </DialogHeader>
 
@@ -163,23 +170,27 @@ const AddCelebrityDialog = ({ open, onOpenChange }) => {
                             />
                         </div>
 
+                        {/* Auto-color preview */}
                         <div className="space-y-2">
                             <Label className="text-white/70">Color de marca</Label>
-                            <div className="flex flex-wrap gap-2">
-                                {PRESET_COLORS.map((c) => (
-                                    <button
-                                        key={c}
-                                        type="button"
-                                        data-testid={`color-${c.slice(1)}`}
-                                        onClick={() => setColor(c)}
-                                        className="relative w-10 h-10 rounded-lg ring-2 ring-transparent hover:ring-white/30 transition"
-                                        style={{ background: c, ringColor: color === c ? c : undefined }}
-                                    >
-                                        {color === c && (
-                                            <Check className="w-4 h-4 text-black absolute inset-0 m-auto" strokeWidth={3} />
-                                        )}
-                                    </button>
-                                ))}
+                            <div className="flex items-center gap-3 p-3 rounded-lg bg-[#0A0A0B] border border-white/10">
+                                {colorLoading ? (
+                                    <>
+                                        <Loader2 className="w-5 h-5 animate-spin text-white/40" />
+                                        <span className="text-sm text-white/40">Detectando color del logo...</span>
+                                    </>
+                                ) : (
+                                    <>
+                                        <div
+                                            className="w-8 h-8 rounded-lg shrink-0 shadow-lg"
+                                            style={{ background: color || "#007AFF" }}
+                                        />
+                                        <div>
+                                            <p className="text-sm text-white font-mono">{color || "#007AFF"}</p>
+                                            <p className="text-[10px] text-white/40">Detectado automáticamente del logo</p>
+                                        </div>
+                                    </>
+                                )}
                             </div>
                         </div>
 
@@ -193,10 +204,10 @@ const AddCelebrityDialog = ({ open, onOpenChange }) => {
                             </Button>
                             <Button
                                 onClick={handleSave}
-                                disabled={saving || !name}
+                                disabled={saving || !name || colorLoading}
                                 data-testid="save-celebrity-btn"
                                 className="text-black font-bold"
-                                style={{ background: color }}
+                                style={{ background: color || "#007AFF" }}
                             >
                                 {saving ? "Guardando..." : "Agregar personaje"}
                             </Button>
