@@ -19,6 +19,7 @@ import isodate
 import feedparser
 import requests
 from groq import Groq
+from io import BytesIO
 
 
 ROOT_DIR = Path(__file__).parent
@@ -57,7 +58,7 @@ class Celebrity(BaseModel):
 
 class CelebrityCreate(BaseModel):
     name: str
-    color: str
+    color: Optional[str] = None  # auto-extracted from logo if not provided
     youtube_channel_id: str
     image_url: Optional[str] = None
 
@@ -362,6 +363,142 @@ def ts_to_seconds(ts: str) -> int:
     return 0
 
 
+def extract_dominant_color(image_url: str) -> Optional[str]:
+    """Download a channel logo and extract its dominant non-grey, non-black, non-white color."""
+    try:
+        resp = requests.get(image_url, timeout=8, headers={"User-Agent": "Mozilla/5.0"})
+        resp.raise_for_status()
+        from PIL import Image
+        img = Image.open(BytesIO(resp.content)).convert("RGB")
+        img = img.resize((80, 80))  # small for speed
+
+        pixels = list(img.getdata())
+        # Filter out near-grey, near-black and near-white pixels
+        filtered = []
+        for r, g, b in pixels:
+            max_c = max(r, g, b)
+            min_c = min(r, g, b)
+            saturation = (max_c - min_c) / max(max_c, 1)
+            brightness = max_c / 255
+            # Keep pixels with decent saturation and not too dark/light
+            if saturation > 0.25 and 0.15 < brightness < 0.95:
+                filtered.append((r, g, b))
+
+        if not filtered:
+            filtered = pixels  # fallback: all pixels
+
+        # Bucket into coarse colors and find the most frequent bucket
+        buckets: dict = {}
+        for r, g, b in filtered:
+            key = (r // 32, g // 32, b // 32)
+            buckets[key] = buckets.get(key, 0) + 1
+
+        if not buckets:
+            return None
+
+        best_bucket = max(buckets, key=lambda k: buckets[k])
+        # Convert bucket center back to full color
+        r = min(255, best_bucket[0] * 32 + 16)
+        g = min(255, best_bucket[1] * 32 + 16)
+        b = min(255, best_bucket[2] * 32 + 16)
+        return f"#{r:02X}{g:02X}{b:02X}"
+    except Exception as e:
+        logging.warning(f"Could not extract dominant color from {image_url}: {e}")
+        return None
+
+
+def fetch_youtube_peaks(video_id: str, duration_seconds: int) -> list:
+    """
+    Attempt to scrape YouTube's 'heatmap' (most-replayed) data from the watch page.
+    Returns a list of peak segments sorted by heat score descending.
+    Each entry: {start_s, end_s, ts, end_ts, heat_score}
+    Falls back to empty list if unavailable.
+    """
+    try:
+        url = f"https://www.youtube.com/watch?v={video_id}"
+        resp = requests.get(url, timeout=12, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
+            "Accept-Language": "es-MX,es;q=0.9",
+        })
+        html = resp.text
+
+        # YouTube embeds heatmap data as "heatMarkers" inside ytInitialData
+        heat_match = re.search(
+            r'"heatMarkers"\s*:\s*(\[.*?\])\s*[,}]',
+            html,
+            re.DOTALL
+        )
+        if not heat_match:
+            return []
+
+        heat_data = json.loads(heat_match.group(1))
+        if not heat_data:
+            return []
+
+        # Each marker: {heatMarkerRenderer: {timeRangeStartMillis, markerDurationScaler (0-1), heatMarkerIntensityScorer (0-1)}}
+        segments = []
+        total_ms = duration_seconds * 1000
+        for item in heat_data:
+            renderer = item.get("heatMarkerRenderer", {})
+            start_ms = renderer.get("timeRangeStartMillis", 0)
+            intensity = renderer.get("heatMarkerIntensityScorer", 0)
+            # each marker covers roughly equal slice of the video
+            segments.append({
+                "start_ms": start_ms,
+                "intensity": intensity,
+            })
+
+        if not segments:
+            return []
+
+        # Sort by intensity descending; pick top peaks separated by at least 60s
+        segments.sort(key=lambda x: x["intensity"], reverse=True)
+
+        peaks = []
+        used_starts = []
+        for seg in segments:
+            start_s = seg["start_ms"] // 1000
+            # Avoid peaks too close together
+            too_close = any(abs(start_s - u) < 60 for u in used_starts)
+            if too_close:
+                continue
+            # Make clip 5 minutes centered-ish around peak, clamped to video
+            clip_start = max(0, start_s - 30)
+            clip_end = min(duration_seconds, clip_start + 300)
+            heat_pct = round(seg["intensity"] * 100)
+
+            def _fmt(s):
+                h = s // 3600
+                m = (s % 3600) // 60
+                sc = s % 60
+                if h > 0:
+                    return f"{h}:{m:02d}:{sc:02d}"
+                return f"{m}:{sc:02d}"
+
+            peaks.append({
+                "start": clip_start,
+                "end": clip_end,
+                "ts": _fmt(clip_start),
+                "end_ts": _fmt(clip_end),
+                "duration": clip_end - clip_start,
+                "heat_score": heat_pct,
+                "topic": f"Pico de retención #{len(peaks)+1} ({heat_pct}% calor)",
+                "reason": f"Segmento con {heat_pct}% de intensidad en Most Replayed de YouTube",
+                "clip_score": min(95, max(50, heat_pct)),
+                "link": f"https://www.youtube.com/watch?v={video_id}&t={clip_start}s",
+                "source": "peaks",
+            })
+            used_starts.append(start_s)
+            if len(peaks) >= 8:
+                break
+
+        return peaks
+
+    except Exception as e:
+        logging.warning(f"Could not fetch YouTube peaks for {video_id}: {e}")
+        return []
+
+
 def parse_chapters(description: str, total_duration: int = 0):
     """Extracts timestamped chapters from a video description."""
     if not description:
@@ -459,10 +596,21 @@ async def get_celebrity(celeb_id: str):
 @api_router.post("/celebrities", response_model=Celebrity)
 async def add_celebrity(payload: CelebrityCreate):
     info = await fetch_channel_info(payload.youtube_channel_id)
+    thumbnail_url = payload.image_url or (info["thumbnail"] if info else None)
+
+    # Auto-extract dominant color from channel logo if not provided
+    final_color = payload.color
+    if not final_color and thumbnail_url:
+        loop = asyncio.get_event_loop()
+        extracted = await loop.run_in_executor(None, lambda: extract_dominant_color(thumbnail_url))
+        final_color = extracted or "#007AFF"
+    elif not final_color:
+        final_color = "#007AFF"
+
     celeb = Celebrity(
         name=payload.name,
-        color=payload.color,
-        image_url=payload.image_url or (info["thumbnail"] if info else None),
+        color=final_color,
+        image_url=thumbnail_url,
         youtube_channel_id=payload.youtube_channel_id,
         subscriber_count=info["subscriber_count"] if info else 0,
         video_count=info["video_count"] if info else 0,
@@ -488,6 +636,14 @@ async def delete_celebrity(celeb_id: str):
 @api_router.get("/youtube/search")
 async def youtube_search(q: str):
     return {"results": search_youtube_channels(q, max_results=8)}
+
+
+@api_router.get("/utils/extract-color")
+async def extract_color_from_url(image_url: str):
+    """Extract dominant brand color from an image URL (e.g. channel logo)."""
+    loop = asyncio.get_event_loop()
+    color = await loop.run_in_executor(None, lambda: extract_dominant_color(image_url))
+    return {"color": color or "#007AFF"}
 
 
 # ===== Routes: Videos =====
@@ -1078,7 +1234,23 @@ async def get_video_clips(celeb_id: str, video_id: str):
             "source": "chapters",
         }
 
-    # Sin chapters: usar IA para generar segmentos recomendados
+    # Sin chapters: intentar peaks de YouTube primero, luego IA
+    # 1) Try Most Replayed (heatmap peaks)
+    if duration >= 60:
+        loop = asyncio.get_event_loop()
+        peaks = await loop.run_in_executor(None, lambda: fetch_youtube_peaks(video_id, duration))
+        if peaks:
+            return {
+                "video_id": video_id,
+                "video_title": video.get("title"),
+                "video_url": video.get("url"),
+                "chapters": [],
+                "clips": peaks,
+                "source": "peaks",
+                "message": "Segmentos basados en picos de retención (Most Replayed) de YouTube.",
+            }
+
+    # 2) Fallback: AI generation via Groq
     api_key = os.environ.get("GROQ_API_KEY")
     if not api_key or duration < 60:
         return {
@@ -1149,11 +1321,14 @@ async def get_video_clips(celeb_id: str, video_id: str):
             end_s = c.get("end_seconds") or parse_ts(c.get("end_ts", "0:00"))
             if end_s <= start_s:
                 end_s = min(start_s + 180, duration)
+            # Always clamp to actual video duration
+            start_s = min(start_s, duration)
+            end_s = min(end_s, duration)
             clip = {
                 "start": start_s,
                 "end": end_s,
-                "ts": c.get("start_ts") or fmt_ts(start_s),
-                "end_ts": c.get("end_ts") or fmt_ts(end_s),
+                "ts": fmt_ts(start_s),
+                "end_ts": fmt_ts(end_s),
                 "duration": end_s - start_s,
                 "topic": c.get("topic", "Segmento"),
                 "reason": c.get("reason", ""),
