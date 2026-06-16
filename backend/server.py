@@ -817,15 +817,28 @@ def _extract_trend_keywords(trending_context: str) -> list:
         return []
     import re as _re
     parts = _re.split(r"[,\n;.]", trending_context)
-    return [p.strip() for p in parts if len(p.strip()) >= 3]
+    return [p.strip() for p in parts if len(p.strip()) >= 2]
 
 def _matches_trends(video: dict, trend_keywords: list) -> float:
-    """Returns 0-1 score of how well a video matches trend keywords."""
+    """Returns 0-1 score of how well a video matches trend keywords.
+    Uses broader matching: exact keyword + word stems + partial matches.
+    """
     if not trend_keywords:
         return 0.0
-    haystack = (video.get("title", "") + " " + video.get("description", "")[:300]).lower()
-    hits = sum(1 for kw in trend_keywords if kw.lower() in haystack)
-    return min(1.0, hits / max(len(trend_keywords), 1) * 3)
+    haystack = (video.get("title", "") + " " + video.get("description", "")[:500]).lower()
+    score = 0.0
+    for kw in trend_keywords:
+        kw_lower = kw.lower()
+        # Exact match (full keyword or phrase)
+        if kw_lower in haystack:
+            score += 1.0
+            continue
+        # Partial word match (keyword root appears in haystack words)
+        kw_words = kw_lower.split()
+        partial_hits = sum(1 for w in kw_words if len(w) >= 4 and any(w in hw for hw in haystack.split()))
+        if partial_hits > 0:
+            score += 0.5 * (partial_hits / len(kw_words))
+    return min(1.0, score / max(len(trend_keywords), 1) * 2.5)
 
 def _recency_score(video: dict) -> float:
     """Score based purely on how recent the video is (0-1)."""
@@ -920,28 +933,36 @@ async def get_hybrid_recommendations(celeb_id: str, kind: str = "video"):
             for i, v in enumerate(candidates_for_ai)
         ])
         selection_prompt = (
-            f"Eres experto en marketing viral latinoamericano.\n"
+            f"Eres experto en marketing viral latinoamericano y estrategia de contenido.\n"
             f"Canal: {celeb['name']}\n"
-            f"Contexto trending actual: {trending_context}\n\n"
-            f"TAREA: De estos {len(candidates_for_ai)} videos del canal, selecciona los 10 que MÁS conectan "
-            f"con el contexto trending actual. Considera:\n"
-            f"- Conexión temática aunque sea indirecta\n"
-            f"- Conexión por contexto cultural, aunque no mencione exactamente las palabras clave\n"
-            f"- Videos que podrían 'resurgir' porque el tema vuelve a ser relevante\n"
-            f"- Videos donde el personaje habla de algo que HOY está en tendencia\n\n"
+            f"Contexto trending ACTUAL (evento o tema que está en tendencia HOY): {trending_context}\n\n"
+            f"CONTEXTO IMPORTANTE: El trending puede ser la muerte de alguien, un escándalo, un evento cultural, "
+            f"una polémica, etc. Los videos del canal NO tienen que mencionar exactamente las palabras clave. "
+            f"Lo que importa es si el VIDEO conecta TEMÁTICAMENTE o EMOCIONALMENTE con lo que está pasando.\n\n"
+            f"EJEMPLOS DE CONEXIÓN VÁLIDA:\n"
+            f"- Si el trending es 'murió Gaspi' → videos del canal sobre humor negro, despedidas, momentos icónicos, "
+            f"o cualquier contenido que la gente compartiría en ese contexto emocional de duelo/nostalgia\n"
+            f"- Si el trending es 'escándalo político' → videos de opinión, debate, análisis\n"
+            f"- Si el trending es 'mundial de fútbol' → videos de deportes, ambiente festivo, eventos en vivo\n\n"
+            f"TAREA: De estos {len(candidates_for_ai)} videos, selecciona los 10 que la gente más probablemente "
+            f"compartiría o buscaría en el contexto del trending actual. Sé creativo con las conexiones.\n\n"
             f"VIDEOS DISPONIBLES:\n{candidates_txt}\n\n"
             f"Responde SOLO con JSON válido sin markdown:\n"
-            f'{{"selected": [{{"video_id": "...", "reason": "Por qué conecta con la tendencia (1 frase)"}}]}}'
+            f'{{"selected": [{{"video_id": "...", "reason": "Por qué conecta con el trending actual (1-2 frases concretas)"}}]}}'
         )
         try:
             groq_client_c = Groq(api_key=api_key)
             sel_msg = groq_client_c.chat.completions.create(
                 model="llama-3.3-70b-versatile",
-                max_tokens=1000,
+                max_tokens=1500,
                 messages=[{"role": "user", "content": selection_prompt}]
             )
             raw_sel = sel_msg.choices[0].message.content.strip()
             raw_sel = re.sub(r"```json|```", "", raw_sel).strip()
+            # Handle cases where JSON might start mid-string
+            json_match = re.search(r"\{.*\}", raw_sel, re.DOTALL)
+            if json_match:
+                raw_sel = json_match.group(0)
             sel_data = json.loads(raw_sel)
             selected_ids_ordered = [s["video_id"] for s in sel_data.get("selected", [])]
             ai_trend_reasons = {s["video_id"]: s.get("reason", "") for s in sel_data.get("selected", [])}
@@ -960,20 +981,22 @@ async def get_hybrid_recommendations(celeb_id: str, kind: str = "video"):
                 cat_c += remaining[:10 - len(cat_c)]
         except Exception as e:
             logging.warning(f"AI trend selection failed, falling back to keyword match: {e}")
-            if trend_keywords:
-                trend_pool.sort(key=lambda v: _matches_trends(v, trend_keywords) * 0.7 + _potential_score(v, channel_subs) * 0.3, reverse=True)
-                cat_c = trend_pool[:10]
-            else:
-                cat_c = sorted(trend_pool, key=lambda v: _potential_score(v, channel_subs), reverse=True)[:10]
+            # Fallback: use keyword score + potential score combined
+            trend_pool.sort(
+                key=lambda v: _matches_trends(v, trend_keywords) * 0.6 + _potential_score(v, channel_subs) * 0.4,
+                reverse=True
+            )
+            cat_c = trend_pool[:10]
+    elif trending_context and not api_key and trend_pool:
+        # No AI key: use keyword matching but ensure we always return 10 videos
+        trend_pool.sort(
+            key=lambda v: _matches_trends(v, trend_keywords) * 0.6 + _potential_score(v, channel_subs) * 0.4,
+            reverse=True
+        )
+        # Return top 10 regardless of keyword score (0 score videos still appear)
+        cat_c = trend_pool[:10]
     else:
-        if trend_keywords:
-            trend_pool.sort(key=lambda v: _matches_trends(v, trend_keywords) * 0.7 + _potential_score(v, channel_subs) * 0.3, reverse=True)
-            cat_c = [v for v in trend_pool if _matches_trends(v, trend_keywords) > 0][:10]
-            if len(cat_c) < 10:
-                remaining = [v for v in trend_pool if v not in cat_c]
-                cat_c += remaining[:10 - len(cat_c)]
-        else:
-            cat_c = sorted(trend_pool, key=lambda v: _potential_score(v, channel_subs), reverse=True)[:10]
+        cat_c = sorted(trend_pool, key=lambda v: _potential_score(v, channel_subs), reverse=True)[:10]
     ai_reasons = {}
     overall_strategy = ""
 
@@ -1481,15 +1504,51 @@ logger = logging.getLogger(__name__)
 async def startup():
     try:
         await seed_celebrities()
-        # Initial video fetch for all
+        # Refresh videos on startup if data is stale (older than 2 hours) or missing
         celebs = await db.celebrities.find({}, {"_id": 0}).to_list(200)
         for c in celebs:
             if c.get("youtube_channel_id"):
                 existing = await db.videos.count_documents({"celebrity_id": c["id"]})
                 if existing == 0:
+                    # No data at all - fetch immediately
                     asyncio.create_task(refresh_celebrity_videos(c["id"], notify=False))
+                else:
+                    # Check if data is stale (older than 2 hours)
+                    scan_state = await db.video_refresh_state.find_one(
+                        {"_key": f"{c['id']}:uploads"}, {"_id": 0}
+                    )
+                    if scan_state:
+                        try:
+                            fetched = datetime.fromisoformat(scan_state["fetched_at"])
+                            age_hours = (datetime.now(timezone.utc) - fetched).total_seconds() / 3600
+                            if age_hours > 2:
+                                logger.info(f"Stale data ({age_hours:.1f}h) for {c['name']} - refreshing on startup")
+                                asyncio.create_task(refresh_celebrity_videos(c["id"], notify=False))
+                        except Exception:
+                            asyncio.create_task(refresh_celebrity_videos(c["id"], notify=False))
+                    else:
+                        # No scan state - refresh anyway
+                        asyncio.create_task(refresh_celebrity_videos(c["id"], notify=False))
+        # Start periodic background refresh (every 90 minutes)
+        asyncio.create_task(_periodic_refresh_loop())
     except Exception as e:
         logger.error(f"Startup error: {e}")
+
+
+async def _periodic_refresh_loop():
+    """Background task: silently refreshes all celebrity videos every 90 minutes."""
+    REFRESH_INTERVAL = 90 * 60  # 90 minutes in seconds
+    while True:
+        await asyncio.sleep(REFRESH_INTERVAL)
+        try:
+            celebs = await db.celebrities.find({}, {"_id": 0}).to_list(200)
+            logger.info(f"Periodic refresh: updating {len(celebs)} celebrities")
+            for c in celebs:
+                if c.get("youtube_channel_id") or c.get("secondary_channels"):
+                    await refresh_celebrity_videos(c["id"], notify=True)
+            logger.info("Periodic refresh completed")
+        except Exception as e:
+            logger.error(f"Periodic refresh error: {e}")
 
 
 @app.on_event("shutdown")
