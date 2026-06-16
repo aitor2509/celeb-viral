@@ -43,6 +43,12 @@ const CelebrityDetail = () => {
 
     useEffect(() => { loadCeleb(); }, [loadCeleb]);
 
+    // Auto-refresh celebrity data every 3 minutes to stay live
+    useEffect(() => {
+        const interval = setInterval(loadCeleb, 3 * 60 * 1000);
+        return () => clearInterval(interval);
+    }, [loadCeleb]);
+
     const handleDeleteViral = async (vid) => {
         await api.delete(`/virals/${vid}`);
         toast.success("Eliminado");
