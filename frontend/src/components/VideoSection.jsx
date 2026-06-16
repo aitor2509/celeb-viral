@@ -52,8 +52,8 @@ const VideoSection = ({ celebrity, kind, refreshSignal = 0, onCelebrityUpdate })
         }
     };
 
-    const load = useCallback(async () => {
-        setLoading(true);
+    const load = useCallback(async (silent = false) => {
+        if (!silent) setLoading(true);
         try {
             const [r, v] = await Promise.all([
                 api.get(`/celebrities/${celebrity.id}/videos`, { params: { kind, sort: "recent" } }),
@@ -62,14 +62,20 @@ const VideoSection = ({ celebrity, kind, refreshSignal = 0, onCelebrityUpdate })
             setRecent(dedup(r.data.videos));
             setViral(dedup(v.data.videos));
         } catch (e) {
-            toast.error("Error al cargar videos");
+            if (!silent) toast.error("Error al cargar videos");
             console.error(e);
         } finally {
-            setLoading(false);
+            if (!silent) setLoading(false);
         }
     }, [celebrity.id, kind]);
 
     useEffect(() => { load(); }, [load, refreshSignal]);
+
+    // Auto-refresh videos silently every 3 minutes so data stays live
+    useEffect(() => {
+        const interval = setInterval(() => load(true), 3 * 60 * 1000);
+        return () => clearInterval(interval);
+    }, [load]);
 
     const fetchRecommendations = async () => {
         setRecoLoading(true);
