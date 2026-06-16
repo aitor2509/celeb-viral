@@ -44,12 +44,12 @@ export const AppProvider = ({ children }) => {
             setLoading(false);
         })();
 
-        // Poll notifications every 20s (was 60s)
+        // Poll notifications every 20s
         const notifInterval = setInterval(loadNotifications, 20000);
         // Detect new celebrities/accounts every 30s
         const celebInterval = setInterval(loadCelebrities, 30000);
-        // Silent backend refresh every 5 minutes
-        const refreshInterval = setInterval(silentRefreshAll, 5 * 60 * 1000);
+        // Silent backend refresh every 3 minutes (was 5 min) to keep YouTube data fresh
+        const refreshInterval = setInterval(silentRefreshAll, 3 * 60 * 1000);
 
         return () => {
             clearInterval(notifInterval);
